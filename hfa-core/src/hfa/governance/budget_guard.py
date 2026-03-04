@@ -38,6 +38,11 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+import inspect
+
+async def _maybe_await(x):
+    return await x if inspect.isawaitable(x) else x
+
 # ---------------------------------------------------------------------------
 # Unit helpers
 # ---------------------------------------------------------------------------
@@ -517,11 +522,15 @@ class BudgetGuard:
         limit_key, spent_key, status_key = self._keys(tenant_id, run_id)
         try:
             pipe = self._redis.pipeline()
-            pipe.set(limit_key,  str(limit_cents))
-            pipe.set(spent_key,  str(spent_cents))
+
+            await _maybe_await(pipe.set(limit_key, str(limit_cents)))
+            await _maybe_await(pipe.set(spent_key, str(spent_cents)))
+
             status = "exhausted" if spent_cents >= limit_cents else "active"
-            pipe.set(status_key, status)
-            await pipe.execute()
+            await _maybe_await(pipe.set(status_key, status))
+
+            await _maybe_await(pipe.execute())
+
             logger.info(
                 "Budget RECOVERED: tenant=%s run=%s spent=%d¢/%d¢ status=%s",
                 tenant_id, run_id, spent_cents, limit_cents, status,
