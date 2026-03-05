@@ -16,32 +16,72 @@ for callers that work in USD floats (e.g. LLM token cost calculators).
 
 Redis key layout
 ----------------
-  budget:<tenant_id>:<run_id>:limit_cents  INT — total budget cap
-  budget:<tenant_id>:<run_id>:spent_cents  INT — running total
-  budget:<tenant_id>:<run_id>:status       STR — "active"|"exhausted"|"frozen"
+  budget:<tenant>:<run_id>:limit_cents   INT  — total budget cap
+  budget:<tenant>:<run_id>:spent_cents   INT  — running total
+  budget:<tenant>:<run_id>:status        STR  — active|exhausted|frozen
+  budget:<tenant>:<run_id>:run_ids       SET  — idempotency set (seen run_ids)
 
-Design
-------
-* All debit/check operations run inside a single Lua script (EVALSHA)
-  for atomicity — no TOCTOU window between read and write.
-* evalsha is called with unpacked positional args, never lists. ← IRONCLAD
-* On Redis unavailability the guard fails-CLOSED (denies spend) by default.
-* Recovery entry restores state after node restart (no audit gap).
+Design — what changed in this revision
+---------------------------------------
+Option A — _maybe_await helper
+  redis-py pipeline queue calls (pipe.set / pipe.get / pipe.setnx) are
+  synchronous in production but return coroutines under AsyncMock in tests.
+  Every pipeline queue call is now wrapped with ``await _maybe_await(res)``
+  so the code works correctly in both environments with zero RuntimeWarning.
+
+Option B — Idempotent Lua debit
+  debit() runs a single EVALSHA that atomically:
+    1. Checks if run_id was already processed (idempotency SET).
+    2. Checks frozen / exhausted status.
+    3. Verifies spend headroom.
+    4. Debits and records run_id in idempotency set.
+  A duplicate run_id call returns allowed=1, idempotent=1 and does NOT
+  subtract from the budget again — safe for at-least-once retry patterns.
+
+IRONCLAD invariants preserved:
+  evalsha called with unpacked positional args (never list)
+  No print() — logging only
+  No asyncio.get_event_loop()
+  All monetary values are integer cents
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import math
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-import inspect
 
-async def _maybe_await(x):
-    return await x if inspect.isawaitable(x) else x
+# ---------------------------------------------------------------------------
+# Option A — _maybe_await helper
+# ---------------------------------------------------------------------------
+
+async def _maybe_await(value: Any) -> Any:
+    """
+    Await ``value`` if it is a coroutine / awaitable, otherwise return as-is.
+
+    redis-py pipeline queue operations (pipe.set, pipe.get, pipe.setnx …)
+    are synchronous in production — they just append to the buffer and
+    return None.  Under AsyncMock in tests they return a coroutine.
+
+    Wrapping every pipeline queue call with ``await _maybe_await(...)``
+    eliminates the RuntimeWarning: coroutine was never awaited warning
+    in both environments, with no conditional logic in the caller.
+
+    Args:
+        value: Return value of a pipeline queue call.
+
+    Returns:
+        Original value or resolved coroutine result.
+    """
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
 
 # ---------------------------------------------------------------------------
 # Unit helpers
@@ -75,53 +115,73 @@ def cents_to_usd(cents: int) -> float:
 # Lua scripts
 # ---------------------------------------------------------------------------
 
-# DEBIT_SCRIPT
-# KEYS[1]=spent_key  KEYS[2]=status_key
-# ARGV[1]=amount_cents(int)  ARGV[2]=limit_cents(int)
-# Returns: [new_spent_cents(str), status(str)]
+# ATOMIC_DEBIT_SCRIPT — Option B: idempotent + no TOCTOU, single round-trip
+#
+# KEYS[1] = spent_key
+# KEYS[2] = status_key
+# KEYS[3] = run_ids_key    Redis SET — idempotency record of seen run_ids
+#
+# ARGV[1] = amount_cents   int string
+# ARGV[2] = limit_cents    int string
+# ARGV[3] = run_id         string
+#
+# Returns 4-element array:
+#   [allowed(0/1), new_spent_cents(str), status(str), idempotent(0/1)]
+#
+#   allowed=1  idempotent=0  → first debit, money taken
+#   allowed=1  idempotent=1  → duplicate run_id, safe replay, no money taken
+#   allowed=0  idempotent=0  → denied: frozen, exhausted, or over limit
+#
 _DEBIT_SCRIPT = """
-local spent_key  = KEYS[1]
-local status_key = KEYS[2]
-local amount     = tonumber(ARGV[1])
-local limit      = tonumber(ARGV[2])
+local spent_key   = KEYS[1]
+local status_key  = KEYS[2]
+local run_ids_key = KEYS[3]
+local amount      = tonumber(ARGV[1])
+local limit       = tonumber(ARGV[2])
+local run_id      = ARGV[3]
 
-local current   = tonumber(redis.call('GET', spent_key) or '0')
+-- idempotency guard: if this run_id was already processed, return current
+-- state without touching any counters (safe for at-least-once delivery)
+if redis.call('SISMEMBER', run_ids_key, run_id) == 1 then
+    local current = tonumber(redis.call('GET', spent_key) or '0')
+    local status  = redis.call('GET', status_key) or 'active'
+    return {1, tostring(current), status, 1}
+end
+
+-- deny immediately if frozen / exhausted (no write needed)
+local status = redis.call('GET', status_key) or 'active'
+if status == 'frozen' or status == 'exhausted' then
+    local current = tonumber(redis.call('GET', spent_key) or '0')
+    return {0, tostring(current), status, 0}
+end
+
+-- deny if headroom is insufficient
+local current = tonumber(redis.call('GET', spent_key) or '0')
+if (current + amount) > limit then
+    return {0, tostring(current), status, 0}
+end
+
+-- atomic debit + record run_id in idempotency set
 local new_spent = current + amount
+redis.call('SET',  spent_key, tostring(new_spent))
+redis.call('SADD', run_ids_key, run_id)
 
-redis.call('SET', spent_key, tostring(new_spent))
-
-local status = 'active'
+local new_status = 'active'
 if new_spent >= limit then
-    status = 'exhausted'
+    new_status = 'exhausted'
     redis.call('SET', status_key, 'exhausted')
 else
+    -- defensive re-read: concurrent freeze may have arrived between our
+    -- initial status read and this write
     local existing = redis.call('GET', status_key)
-    if existing ~= 'frozen' then
+    if existing == 'frozen' then
+        new_status = 'frozen'
+    else
         redis.call('SET', status_key, 'active')
     end
 end
 
-return {tostring(new_spent), status}
-"""
-
-# CHECK_SCRIPT — returns 1 if allowed, 0 if denied
-_CHECK_SCRIPT = """
-local spent_key  = KEYS[1]
-local status_key = KEYS[2]
-local amount     = tonumber(ARGV[1])
-local limit      = tonumber(ARGV[2])
-
-local status = redis.call('GET', status_key) or 'active'
-if status == 'frozen' or status == 'exhausted' then
-    return 0
-end
-
-local current = tonumber(redis.call('GET', spent_key) or '0')
-if (current + amount) > limit then
-    return 0
-end
-
-return 1
+return {1, tostring(new_spent), new_status, 0}
 """
 
 # FREEZE_SCRIPT — KEYS[1]=status_key
@@ -130,10 +190,13 @@ redis.call('SET', KEYS[1], 'frozen')
 return 1
 """
 
-# RESET_SCRIPT — KEYS[1]=spent_key  KEYS[2]=status_key
+# RESET_SCRIPT — clears spent, status, AND idempotency run_ids set
+# After reset the same run_ids can be re-processed.
+# KEYS[1]=spent_key  KEYS[2]=status_key  KEYS[3]=run_ids_key
 _RESET_SCRIPT = """
 redis.call('SET', KEYS[1], '0')
 redis.call('SET', KEYS[2], 'active')
+redis.call('DEL', KEYS[3])
 return 1
 """
 
@@ -160,7 +223,8 @@ class BudgetState:
     spent_cents:     int
     limit_cents:     int
     status:          BudgetStatus
-    remaining_cents: int = field(init=False)
+    idempotent:      bool = False     # True when debit was a safe replay
+    remaining_cents: int  = field(init=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -200,15 +264,6 @@ class BudgetExhaustedError(Exception):
         )
 
 
-# --- auto_fix_sprint2_v3: helper to support AsyncMock/async redis in tests ---
-import inspect
-
-async def _maybe_await(value):
-    if inspect.isawaitable(value):
-        return await value
-    return value
-
-
 class BudgetGuardError(Exception):
     """Raised on infrastructure failure (Redis unavailable, etc.)."""
 
@@ -219,7 +274,8 @@ class BudgetGuardError(Exception):
 
 class BudgetGuard:
     """
-    Atomic, Redis-backed budget enforcement. All amounts in integer CENTS.
+    Atomic, idempotent, Redis-backed budget enforcement.
+    All amounts are integer CENTS.
 
     Usage
     -----
@@ -227,7 +283,11 @@ class BudgetGuard:
         await guard.initialise()
 
         await guard.set_budget("acme", "run-acme-abc", limit_cents=500)
-        await guard.debit("acme", "run-acme-abc", amount_cents=usd_to_cents(0.003))
+        s1 = await guard.debit("acme", "run-acme-abc", amount_cents=10)
+        assert not s1.idempotent          # first call
+
+        s2 = await guard.debit("acme", "run-acme-abc", amount_cents=10)
+        assert s2.idempotent              # safe replay, not double-charged
 
     Args:
         redis:      aioredis.Redis (or compatible async client).
@@ -246,7 +306,6 @@ class BudgetGuard:
         self._prefix    = key_prefix
         self._fail_open = fail_open
         self._sha_debit:  Optional[str] = None
-        self._sha_check:  Optional[str] = None
         self._sha_freeze: Optional[str] = None
         self._sha_reset:  Optional[str] = None
         logger.info("BudgetGuard created (fail_open=%s)", fail_open)
@@ -265,11 +324,10 @@ class BudgetGuard:
         """
         try:
             self._sha_debit  = await self._redis.script_load(_DEBIT_SCRIPT)
-            self._sha_check  = await self._redis.script_load(_CHECK_SCRIPT)
             self._sha_freeze = await self._redis.script_load(_FREEZE_SCRIPT)
             self._sha_reset  = await self._redis.script_load(_RESET_SCRIPT)
             logger.info(
-                "BudgetGuard Lua scripts loaded (SHA debit=%s…)", self._sha_debit[:8]
+                "BudgetGuard Lua scripts loaded: sha_debit=%s…", self._sha_debit[:8]
             )
         except Exception as exc:
             logger.critical("BudgetGuard.initialise failed: %s", exc, exc_info=True)
@@ -293,11 +351,11 @@ class BudgetGuard:
             tenant_id:   Tenant identifier.
             run_id:      Run identifier.
             limit_cents: Maximum allowed spend in INTEGER CENTS (e.g. 500 = $5.00).
-            reset_spent: If True, also zero out current spent counter.
+            reset_spent: If True, zero out spent counter and clear idempotency set.
 
         Raises:
             TypeError:        If limit_cents is not int.
-            ValueError:       If limit_cents ≤ 0.
+            ValueError:       If limit_cents <= 0.
             BudgetGuardError: On Redis failure.
         """
         if not isinstance(limit_cents, int):
@@ -308,17 +366,19 @@ class BudgetGuard:
         if limit_cents <= 0:
             raise ValueError(f"limit_cents must be positive, got {limit_cents}")
 
-        limit_key, spent_key, status_key = self._keys(tenant_id, run_id)
+        limit_key, spent_key, status_key, run_ids_key = self._keys(tenant_id, run_id)
 
         try:
             pipe = self._redis.pipeline()
-            pipe.set(limit_key, str(limit_cents))
+            # ✅ Option A: _maybe_await wraps every pipeline queue call
+            await _maybe_await(pipe.set(limit_key, str(limit_cents)))
             if reset_spent:
-                pipe.set(spent_key, "0")
-                pipe.set(status_key, "active")
+                await _maybe_await(pipe.set(spent_key, "0"))
+                await _maybe_await(pipe.set(status_key, "active"))
+                await _maybe_await(pipe.delete(run_ids_key))
             else:
-                pipe.setnx(spent_key, "0")
-                pipe.setnx(status_key, "active")
+                await _maybe_await(pipe.setnx(spent_key, "0"))
+                await _maybe_await(pipe.setnx(status_key, "active"))
             await pipe.execute()
             logger.info(
                 "Budget set: tenant=%s run=%s limit=%d¢ ($%.2f) reset=%s",
@@ -337,10 +397,14 @@ class BudgetGuard:
         """
         Atomically debit amount_cents from the run's budget.
 
+        Idempotent: calling debit() twice with the same run_id is safe —
+        the second call returns allowed=1, state.idempotent=True and does
+        NOT subtract from the budget again.
+
         Args:
             tenant_id:    Tenant identifier.
-            run_id:       Run identifier.
-            amount_cents: INTEGER CENTS to debit (≥ 1).
+            run_id:       Run identifier (also used as idempotency key).
+            amount_cents: INTEGER CENTS to debit (>= 1).
                           Use usd_to_cents(float) to convert from USD.
 
         Returns:
@@ -358,46 +422,42 @@ class BudgetGuard:
                 "Use usd_to_cents() to convert."
             )
         if amount_cents < 1:
-            raise ValueError(f"amount_cents must be ≥ 1, got {amount_cents}")
+            raise ValueError(f"amount_cents must be >= 1, got {amount_cents}")
 
         self._assert_initialised()
 
-        limit_key, spent_key, status_key = self._keys(tenant_id, run_id)
+        limit_key, spent_key, status_key, run_ids_key = self._keys(tenant_id, run_id)
 
         try:
             limit_cents = await self._get_limit_cents(limit_key, tenant_id, run_id)
 
-            # Atomic pre-check (no debit yet)
-            can_spend = await self._redis.evalsha(
-                self._sha_check,
-                2,                     # ✅ IRONCLAD: unpacked int, not list
+            # ✅ Option B: single Lua round-trip — check + idempotency + debit
+            # KEYS: spent_key, status_key, run_ids_key (3 keys)
+            # ARGV: amount_cents, limit_cents, run_id
+            # Returns: [allowed, new_spent, status, idempotent]
+            result = await self._redis.evalsha(
+                self._sha_debit,
+                3,              # ✅ IRONCLAD: num_keys as unpacked int, not list
                 spent_key,
                 status_key,
+                run_ids_key,
                 str(amount_cents),
                 str(limit_cents),
+                run_id,
             )
 
-            if not can_spend:
-                current_spent = int(await self._redis.get(spent_key) or 0)
+            allowed         = int(result[0])
+            new_spent_cents = int(result[1])
+            status          = BudgetStatus(result[2])
+            idempotent      = bool(int(result[3]))
+
+            if not allowed:
                 raise BudgetExhaustedError(
                     tenant_id,
                     run_id,
                     amount_cents,
-                    max(0, limit_cents - current_spent),
+                    max(0, limit_cents - new_spent_cents),
                 )
-
-            # Atomic debit
-            result = await self._redis.evalsha(
-                self._sha_debit,
-                2,                     # ✅ IRONCLAD: unpacked int, not list
-                spent_key,
-                status_key,
-                str(amount_cents),
-                str(limit_cents),
-            )
-
-            new_spent_cents = int(result[0])
-            status          = BudgetStatus(result[1])
 
             state = BudgetState(
                 tenant_id=tenant_id,
@@ -405,13 +465,13 @@ class BudgetGuard:
                 spent_cents=new_spent_cents,
                 limit_cents=limit_cents,
                 status=status,
+                idempotent=idempotent,
             )
             logger.info(
-                "Debit OK: tenant=%s run=%s amount=%d¢ spent=%d¢/%d¢ ($%.2f/$%.2f) status=%s",
+                "Debit %s: tenant=%s run=%s amount=%dc spent=%dc/%dc status=%s",
+                "REPLAY" if idempotent else "OK",
                 tenant_id, run_id,
-                amount_cents,
-                new_spent_cents, limit_cents,
-                cents_to_usd(new_spent_cents), cents_to_usd(limit_cents),
+                amount_cents, new_spent_cents, limit_cents,
                 status.value,
             )
             return state
@@ -438,12 +498,13 @@ class BudgetGuard:
         Raises:
             BudgetGuardError: On Redis failure or if budget not initialised.
         """
-        limit_key, spent_key, status_key = self._keys(tenant_id, run_id)
+        limit_key, spent_key, status_key, _ = self._keys(tenant_id, run_id)
         try:
             pipe = self._redis.pipeline()
-            pipe.get(limit_key)
-            pipe.get(spent_key)
-            pipe.get(status_key)
+            # ✅ Option A: _maybe_await on every pipeline queue call
+            await _maybe_await(pipe.get(limit_key))
+            await _maybe_await(pipe.get(spent_key))
+            await _maybe_await(pipe.get(status_key))
             limit_raw, spent_raw, status_raw = await pipe.execute()
 
             if limit_raw is None:
@@ -467,7 +528,7 @@ class BudgetGuard:
     async def freeze(self, tenant_id: str, run_id: str) -> None:
         """Operator emergency stop — freeze the run's budget."""
         self._assert_initialised()
-        _, _, status_key = self._keys(tenant_id, run_id)
+        _, _, status_key, _ = self._keys(tenant_id, run_id)
         try:
             await self._redis.evalsha(
                 self._sha_freeze, 1, status_key  # ✅ unpacked
@@ -478,12 +539,15 @@ class BudgetGuard:
             raise BudgetGuardError("freeze Redis failure") from exc
 
     async def reset(self, tenant_id: str, run_id: str) -> None:
-        """Reset spent counter and unfreeze budget (use after human review)."""
+        """
+        Reset spent counter, unfreeze budget, and clear the idempotency set.
+        Use after human review.  After reset, same run_ids can be re-debited.
+        """
         self._assert_initialised()
-        _, spent_key, status_key = self._keys(tenant_id, run_id)
+        _, spent_key, status_key, run_ids_key = self._keys(tenant_id, run_id)
         try:
             await self._redis.evalsha(
-                self._sha_reset, 2, spent_key, status_key  # ✅ unpacked
+                self._sha_reset, 3, spent_key, status_key, run_ids_key  # ✅ unpacked
             )
             logger.info("Budget RESET: tenant=%s run=%s", tenant_id, run_id)
         except Exception as exc:
@@ -503,7 +567,10 @@ class BudgetGuard:
     ) -> None:
         """
         Crash-recovery: restore known-good state after node restart.
-        Replays event log values; does not reset audit trail.
+        Replays event-log values; does NOT zero out spent (by design).
+
+        Note: The idempotency run_ids set is preserved — replayed run_ids
+        are still recognised.  Call reset() first for a full clean slate.
 
         Args:
             tenant_id:   Tenant identifier.
@@ -519,20 +586,17 @@ class BudgetGuard:
             if not isinstance(val, int):
                 raise TypeError(f"{name} must be int, got {type(val).__name__}")
 
-        limit_key, spent_key, status_key = self._keys(tenant_id, run_id)
+        limit_key, spent_key, status_key, _ = self._keys(tenant_id, run_id)
         try:
-            pipe = self._redis.pipeline()
-
-            await _maybe_await(pipe.set(limit_key, str(limit_cents)))
-            await _maybe_await(pipe.set(spent_key, str(spent_cents)))
-
             status = "exhausted" if spent_cents >= limit_cents else "active"
+            pipe = self._redis.pipeline()
+            # ✅ Option A: _maybe_await on every pipeline queue call
+            await _maybe_await(pipe.set(limit_key,  str(limit_cents)))
+            await _maybe_await(pipe.set(spent_key,  str(spent_cents)))
             await _maybe_await(pipe.set(status_key, status))
-
-            await _maybe_await(pipe.execute())
-
+            await pipe.execute()
             logger.info(
-                "Budget RECOVERED: tenant=%s run=%s spent=%d¢/%d¢ status=%s",
+                "Budget RECOVERED: tenant=%s run=%s spent=%dc/%dc status=%s",
                 tenant_id, run_id, spent_cents, limit_cents, status,
             )
         except Exception as exc:
@@ -540,12 +604,18 @@ class BudgetGuard:
             raise BudgetGuardError("recover_run Redis failure") from exc
 
     # ------------------------------------------------------------------
-    # Helpers
+    # Private helpers
     # ------------------------------------------------------------------
 
-    def _keys(self, tenant_id: str, run_id: str) -> tuple[str, str, str]:
+    def _keys(self, tenant_id: str, run_id: str) -> tuple[str, str, str, str]:
+        """Return (limit_key, spent_key, status_key, run_ids_key)."""
         base = f"{self._prefix}:{tenant_id}:{run_id}"
-        return f"{base}:limit_cents", f"{base}:spent_cents", f"{base}:status"
+        return (
+            f"{base}:limit_cents",
+            f"{base}:spent_cents",
+            f"{base}:status",
+            f"{base}:run_ids",     # idempotency set — Option B
+        )
 
     async def _get_limit_cents(
         self, limit_key: str, tenant_id: str, run_id: str

@@ -663,3 +663,300 @@ class TestLedgerMiddleware:
         response = await middleware.dispatch(mock_request, call_next)
         assert response.status_code == 200
         await asyncio.sleep(0.05)  # let fire-and-forget settle
+
+
+# ===========================================================================
+# New tests: Run-ID entropy + Atomic BudgetGuard + Rate Limiting
+# ===========================================================================
+
+class TestRunIdEntropy:
+    """validate_run_id_format — UUID tail enforcement."""
+
+    def test_valid_run_id(self):
+        from hfa_tools.middleware.tenant import validate_run_id_format
+        tenant, uid = validate_run_id_format(
+            "run-acme_corp-550e8400-e29b-41d4-a716-446655440000"
+        )
+        assert tenant == "acme_corp"
+        assert uid == "550e8400-e29b-41d4-a716-446655440000"
+
+    def test_rejects_missing_uuid(self):
+        from hfa_tools.middleware.tenant import validate_run_id_format, TenantFormatError
+        with pytest.raises(TenantFormatError, match="UUID tail"):
+            validate_run_id_format("run-acme_corp-notauuid")
+
+    def test_rejects_wrong_prefix(self):
+        from hfa_tools.middleware.tenant import validate_run_id_format, TenantFormatError
+        with pytest.raises(TenantFormatError, match="expected"):
+            validate_run_id_format("job-acme_corp-550e8400-e29b-41d4-a716-446655440000")
+
+    def test_rejects_only_two_parts(self):
+        from hfa_tools.middleware.tenant import validate_run_id_format, TenantFormatError
+        with pytest.raises(TenantFormatError):
+            validate_run_id_format("run-acme_corp")
+
+    def test_normalises_uuid(self):
+        """UUID should be normalised to lowercase hyphenated form."""
+        from hfa_tools.middleware.tenant import validate_run_id_format
+        _, uid = validate_run_id_format(
+            "run-acme_corp-550E8400-E29B-41D4-A716-446655440000"
+        )
+        assert uid == "550e8400-e29b-41d4-a716-446655440000"
+
+    def test_invalid_tenant_segment(self):
+        from hfa_tools.middleware.tenant import validate_run_id_format, TenantFormatError
+        with pytest.raises(TenantFormatError, match="tenant segment"):
+            validate_run_id_format("run--550e8400-e29b-41d4-a716-446655440000")
+
+    @pytest.mark.asyncio
+    async def test_middleware_rejects_non_uuid_run_id(self):
+        """Full middleware path: X-Run-Id with non-UUID tail → 403."""
+        from unittest.mock import AsyncMock, MagicMock
+        from hfa_tools.middleware.tenant import TenantMiddleware
+
+        mock_app = AsyncMock()
+        mw = TenantMiddleware(mock_app)
+
+        request = MagicMock()
+        request.url.path = "/runs/run-acme_corp-BADTAIL"
+        request.headers = {
+            "X-Run-Id": "run-acme_corp-BADTAIL"
+        }
+        request.path_params = {}
+
+        async def call_next(req):
+            return MagicMock(status_code=200, headers={})
+
+        resp = await mw.dispatch(request, call_next)
+        assert resp.status_code == 403
+
+
+class TestAtomicBudgetGuard:
+    """Verify single-script atomic debit — no _sha_check, result[2] for status."""
+
+    @pytest.fixture
+    def redis(self):
+        from unittest.mock import AsyncMock, MagicMock
+        r = AsyncMock()
+        pipe = AsyncMock()
+        pipe.execute = AsyncMock(return_value=[None, None, None])
+        r.pipeline = MagicMock(return_value=pipe)
+        r.script_load = AsyncMock(side_effect=["sha_debit", "sha_freeze", "sha_reset"])
+        return r
+
+    @pytest.mark.asyncio
+    async def test_initialise_loads_three_scripts_not_four(self, redis):
+        """Atomic refactor: 3 scripts loaded (debit, freeze, reset) — check removed."""
+        from hfa.governance.budget_guard import BudgetGuard
+        guard = BudgetGuard(redis)
+        await guard.initialise()
+        assert redis.script_load.call_count == 3
+        assert not hasattr(guard, '_sha_check') or guard._sha_check is None  # type: ignore
+
+    @pytest.mark.asyncio
+    async def test_debit_single_evalsha_call(self, redis):
+        """debit() must issue exactly ONE evalsha call (atomic)."""
+        from hfa.governance.budget_guard import BudgetGuard, BudgetStatus
+
+        guard = BudgetGuard(redis)
+        await guard.initialise()
+
+        redis.get = AsyncMock(return_value="500")
+        # atomic script returns [allowed, new_spent, status]
+        redis.evalsha = AsyncMock(return_value=["1", "50", "active"])
+
+        state = await guard.debit("acme_corp", "run-acme_corp-abc", 50)
+
+        # Must be exactly 1 evalsha call (not 2)
+        assert redis.evalsha.call_count == 1
+        assert state.status == BudgetStatus.ACTIVE
+        assert state.spent_cents == 50
+
+    @pytest.mark.asyncio
+    async def test_debit_denied_when_allowed_zero(self, redis):
+        """Lua returns allowed=0 → BudgetExhaustedError raised."""
+        from hfa.governance.budget_guard import BudgetGuard, BudgetExhaustedError
+
+        guard = BudgetGuard(redis)
+        await guard.initialise()
+
+        redis.get = AsyncMock(return_value="500")
+        redis.evalsha = AsyncMock(return_value=["0", "500", "exhausted"])
+
+        with pytest.raises(BudgetExhaustedError) as exc:
+            await guard.debit("acme_corp", "run-acme_corp-abc", 100)
+        assert exc.value.attempted_cents == 100
+
+    @pytest.mark.asyncio
+    async def test_evalsha_unpacked_args(self, redis):
+        """IRONCLAD rule: evalsha must receive unpacked positional args, not lists."""
+        from hfa.governance.budget_guard import BudgetGuard
+
+        guard = BudgetGuard(redis)
+        await guard.initialise()
+
+        redis.get = AsyncMock(return_value="500")
+        redis.evalsha = AsyncMock(return_value=["1", "10", "active"])
+
+        await guard.debit("acme_corp", "run-acme_corp-abc", 10)
+
+        call_args = redis.evalsha.call_args.args
+        # evalsha(sha, num_keys, key1, key2, arg1, arg2)
+        assert call_args[1] == 2          # num_keys as int
+        assert isinstance(call_args[2], str)  # key1 unpacked
+        assert isinstance(call_args[3], str)  # key2 unpacked
+        assert call_args[4] == "10"       # amount_cents
+        assert call_args[5] == "500"      # limit_cents
+
+
+class TestTenantRateLimitMiddleware:
+    """TenantRateLimitMiddleware — per-tenant fixed-window rate limiting."""
+
+    def _make_middleware(self, rpm=10, burst=5, fail_open=True):
+        from unittest.mock import AsyncMock, MagicMock
+        from hfa_tools.middleware.rate_limit import TenantRateLimitMiddleware
+
+        mock_app = AsyncMock()
+        redis = AsyncMock()
+        pipe = AsyncMock()
+        redis.pipeline = MagicMock(return_value=pipe)
+        # Default: count=1, expire=True
+        pipe.execute = AsyncMock(return_value=[1, True])
+
+        mw = TenantRateLimitMiddleware(
+            mock_app, redis=redis, rpm=rpm, burst=burst, fail_open=fail_open
+        )
+        return mw, redis, pipe
+
+    def _make_request(self, path="/api/plans", tenant_id="acme_corp"):
+        from unittest.mock import MagicMock
+        from hfa_tools.middleware.tenant import TenantContext
+
+        request = MagicMock()
+        request.url.path = path
+        request.state.tenant = TenantContext(
+            tenant_id=tenant_id,
+            run_id=None,
+            source="header",
+        )
+        return request
+
+    @pytest.mark.asyncio
+    async def test_allows_request_under_limit(self):
+        mw, redis, pipe = self._make_middleware(rpm=10, burst=5)
+        request = self._make_request()
+        pipe.execute = AsyncMock(return_value=[1, True])  # count=1
+
+        async def call_next(req):
+            from unittest.mock import MagicMock
+            resp = MagicMock()
+            resp.headers = {}
+            resp.status_code = 200
+            return resp
+
+        resp = await mw.dispatch(request, call_next)
+        assert resp.status_code == 200
+        assert "X-RateLimit-Limit" in resp.headers
+
+    @pytest.mark.asyncio
+    async def test_rejects_request_over_limit(self):
+        mw, redis, pipe = self._make_middleware(rpm=10, burst=5)
+        request = self._make_request()
+        pipe.execute = AsyncMock(return_value=[16, True])  # count=16 > 15
+
+        resp = await mw.dispatch(request, AsyncMock())
+        assert resp.status_code == 429
+        assert "Retry-After" in resp.headers
+        assert resp.headers["X-RateLimit-Remaining"] == "0"
+
+    @pytest.mark.asyncio
+    async def test_skips_health_path(self):
+        mw, redis, pipe = self._make_middleware()
+        request = self._make_request(path="/health")
+
+        called = []
+        async def call_next(req):
+            called.append(True)
+            from unittest.mock import MagicMock
+            resp = MagicMock()
+            resp.headers = {}
+            resp.status_code = 200
+            return resp
+
+        resp = await mw.dispatch(request, call_next)
+        assert resp.status_code == 200
+        assert len(called) == 1
+        # Redis must NOT have been touched for skip paths
+        redis.pipeline.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fail_open_allows_on_redis_error(self):
+        mw, redis, pipe = self._make_middleware(fail_open=True)
+        request = self._make_request()
+        pipe.execute = AsyncMock(side_effect=ConnectionError("Redis down"))
+
+        called = []
+        async def call_next(req):
+            called.append(True)
+            from unittest.mock import MagicMock
+            resp = MagicMock()
+            resp.headers = {}
+            resp.status_code = 200
+            return resp
+
+        resp = await mw.dispatch(request, call_next)
+        assert len(called) == 1  # request was allowed through
+
+    @pytest.mark.asyncio
+    async def test_fail_closed_returns_503_on_redis_error(self):
+        mw, redis, pipe = self._make_middleware(fail_open=False)
+        request = self._make_request()
+        pipe.execute = AsyncMock(side_effect=ConnectionError("Redis down"))
+
+        resp = await mw.dispatch(request, AsyncMock())
+        assert resp.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_no_tenant_context_passes_through(self):
+        """If TenantMiddleware didn't run, rate limiter is skipped."""
+        from unittest.mock import MagicMock
+        mw, redis, pipe = self._make_middleware()
+
+        request = MagicMock()
+        request.url.path = "/api/plans"
+        del request.state.tenant  # no tenant context
+        request.state = MagicMock(spec=[])  # empty state
+
+        called = []
+        async def call_next(req):
+            called.append(True)
+            resp = MagicMock()
+            resp.headers = {}
+            resp.status_code = 200
+            return resp
+
+        resp = await mw.dispatch(request, call_next)
+        assert len(called) == 1
+        redis.pipeline.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_redis_key_format(self):
+        """Rate limit key must be rl:<tenant_id>:<minute_bucket>."""
+        import time
+        mw, redis, pipe = self._make_middleware()
+        request = self._make_request(tenant_id="test_tenant")
+        pipe.execute = AsyncMock(return_value=[1, True])
+
+        async def call_next(req):
+            from unittest.mock import MagicMock
+            resp = MagicMock()
+            resp.headers = {}
+            return resp
+
+        await mw.dispatch(request, call_next)
+
+        # Check that INCR was called with the right key
+        incr_call = pipe.incr.call_args
+        key = incr_call.args[0]
+        expected_bucket = int(time.time()) // 60
+        assert key == f"rl:test_tenant:{expected_bucket}"
