@@ -8,7 +8,7 @@ import logging
 import uuid
 
 from pydantic import BaseModel, Field, TypeAdapter
-
+from typing import Annotated, Optional, Union, Literal
 logger = logging.getLogger(__name__)
 
 
@@ -224,3 +224,11 @@ def parse_agent_request(data: dict) -> AgentRequest:
         logger.error(f"Failed to parse agent request: {e}", exc_info=True)
         # fail-closed, sanitized
         raise ValueError("Invalid agent request format")
+# ----------------------------------------------------------------------
+# PYDANTIC REBUILD (For Discriminated Union Type Resolution)
+# ----------------------------------------------------------------------
+ArchitectRequest.model_rebuild()
+SupervisorRequest.model_rebuild()
+ResearchRequest.model_rebuild()
+DebuggerRequest.model_rebuild()
+PromptEngineerRequest.model_rebuild()
