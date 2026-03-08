@@ -1,194 +1,305 @@
 """
 hfa-tools/src/hfa_tools/middleware/tenant.py
-IRONCLAD — Tenant middleware with proper exports
+
+IRONCLAD — Tenant extraction, validation, and request-scoped injection.
 """
-from dataclasses import dataclass
+from __future__ import annotations
+
+import logging
 import re
 import uuid
-from typing import Optional, Dict, Any, Union
-from fastapi import Request, HTTPException
+from dataclasses import dataclass
+from functools import lru_cache
+from typing import Callable, Optional
+
+from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp
 
-# ============================================================================
-# Public exports - Bunlar testler tarafından import ediliyor
-# ============================================================================
+logger = logging.getLogger(__name__)
 
-@dataclass
-class ParsedRunId:
-    """Parsed run ID components."""
-    prefix: str
-    tenant_id: str
-    uuid: str
-    uuid_version: int
+_TENANT_HEADER = "X-Tenant-Id"
+_RUN_ID_HEADER = "X-Run-Id"
 
+# Tenant ID: alnum start/end, middle may contain alnum, _, ., -
+_TENANT_REGEX = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{1,98}[a-zA-Z0-9]$")
 
-class TenantFormatError(Exception):
-    """Raised when tenant/run ID format is invalid."""
-    pass
+# Canonical run_id: run-<tenant_id>-<uuid>
+# Greedy tenant capture is safe because UUID tail is strongly constrained.
+_RUN_ID_REGEX = re.compile(
+    r"^run-(?P<tenant_id>[a-zA-Z0-9][a-zA-Z0-9_.\-]{1,98}[a-zA-Z0-9])-(?P<uuid>[0-9a-fA-F\-]{36})$"
+)
 
 
-def _header_get(headers: Union[Dict, Any], key: str) -> Optional[str]:
+@lru_cache(maxsize=4096)
+def is_valid_tenant_id(tenant_id: str) -> bool:
+    return bool(_TENANT_REGEX.fullmatch(tenant_id))
+
+
+def _header_get(headers, key: str):
     """
-    Case-insensitive header lookup.
-
-    Args:
-        headers: Dict or Starlette Headers object
-        key: Header name (case-insensitive)
-
-    Returns:
-        Header value or None
+    Case-insensitive header getter.
+    Works with Starlette Headers and plain dict/MagicMock-backed mappings in tests.
     """
-    if not headers:
+    if headers is None:
         return None
 
-    key_lower = key.lower()
+    # Fast path
+    try:
+        value = headers.get(key)
+        if value is not None:
+            return value
+    except Exception:
+        pass
 
-    # Dict lookup
-    if isinstance(headers, dict):
-        for k, v in headers.items():
-            if k.lower() == key_lower:
-                return v
+    # Lowercase lookup for plain dicts
+    lk = str(key).lower()
+    try:
+        value = headers.get(lk)
+        if value is not None:
+            return value
+    except Exception:
+        pass
+
+    # Full scan fallback
+    try:
+        items = headers.items()
+    except Exception:
         return None
 
-    # Starlette Headers object
-    if hasattr(headers, 'get'):
-        return headers.get(key)
-
+    for k, v in items:
+        if str(k).lower() == lk:
+            return v
     return None
 
 
-def validate_run_id_format(run_id: str, expected_tenant_id: str) -> ParsedRunId:
-    """
-    Validate run-id format: {prefix}-{tenant_id}-{uuid4}
+class TenantError(Exception):
+    """Base class for tenant middleware errors."""
 
-    Args:
-        run_id: Run ID to validate
-        expected_tenant_id: Expected tenant ID
 
-    Returns:
-        ParsedRunId components
+class TenantMissingError(TenantError):
+    """Request has no tenant identification."""
 
-    Raises:
-        TenantFormatError: If format is invalid
-    """
-    parts = run_id.split('-', 2)
-    if len(parts) < 3:
-        raise TenantFormatError(f"Invalid run-id format (expected 3 parts): {run_id}")
 
-    prefix, tenant, uuid_str = parts[0], parts[1], parts[2]
+class TenantFormatError(TenantError):
+    """Tenant ID / run ID does not match required format."""
 
-    # Check prefix
-    if prefix != "run":
-        raise TenantFormatError(f"Invalid prefix (expected 'run', got '{prefix}')")
 
-    # Check tenant match
-    if tenant != expected_tenant_id:
-        raise TenantFormatError(
-            f"Tenant mismatch: '{tenant}' != '{expected_tenant_id}'"
+class TenantMismatchError(TenantError):
+    """Authenticated tenant does not match resource owner."""
+
+
+@dataclass(frozen=True)
+class ParsedRunId:
+    tenant_id: str
+    uuid_str: str
+    raw: str
+
+
+class TenantContext:
+    __slots__ = ("tenant_id", "run_id", "source")
+
+    def __init__(self, tenant_id: str, run_id: Optional[str], source: str) -> None:
+        self.tenant_id = tenant_id
+        self.run_id = run_id
+        self.source = source
+
+    def __repr__(self) -> str:
+        return (
+            f"TenantContext(tenant_id={self.tenant_id!r}, "
+            f"run_id={self.run_id!r}, source={self.source!r})"
         )
 
-    # Validate UUID
+
+def validate_run_id_format(run_id: str) -> tuple[str, str]:
+    """
+    Validate canonical run_id: run-<tenant_id>-<uuidv4>
+
+    Returns:
+        (tenant_id, normalized_uuid)
+    """
+    if not isinstance(run_id, str) or not run_id:
+        raise TenantFormatError("run_id must be a non-empty string")
+
+    m = _RUN_ID_REGEX.fullmatch(run_id)
+    if not m:
+        raise TenantFormatError(
+            f"Invalid run_id format: {run_id!r} (expected 'run-<tenant_id>-<uuid>')"
+        )
+
+    tenant_id = m.group("tenant_id")
+    uuid_tail = m.group("uuid")
+
+    if not is_valid_tenant_id(tenant_id):
+        raise TenantFormatError(
+            f"Invalid tenant segment inside run_id: {run_id!r}"
+        )
+
     try:
-        u = uuid.UUID(uuid_str)
-        if u.version != 4:
-            raise TenantFormatError(f"UUID version {u.version} != 4")
-        if u.int == 0:
-            raise TenantFormatError("Nil UUID not allowed")
-    except ValueError as e:
-        raise TenantFormatError(f"Invalid UUID: {uuid_str}") from e
+        parsed = uuid.UUID(uuid_tail)
+    except (ValueError, AttributeError) as exc:
+        raise TenantFormatError(
+            f"run_id must contain a valid UUID tail: {run_id!r}"
+        ) from exc
 
-    return ParsedRunId(
-        prefix=prefix,
-        tenant_id=tenant,
-        uuid=uuid_str,
-        uuid_version=4
-    )
+    if parsed.version != 4:
+        raise TenantFormatError(
+            f"run_id UUID must be UUIDv4, got v{parsed.version}"
+        )
+
+    if parsed.int == 0:
+        raise TenantFormatError("run_id UUID must not be nil UUID")
+
+    return tenant_id, str(parsed)
 
 
-# ============================================================================
-# Tenant Middleware
-# ============================================================================
+def parse_run_id(run_id: str) -> ParsedRunId:
+    tenant_id, uuid_str = validate_run_id_format(run_id)
+    return ParsedRunId(tenant_id=tenant_id, uuid_str=uuid_str, raw=run_id)
+
+
+def extract_tenant_from_resource_id(resource_id: str) -> Optional[str]:
+    try:
+        tenant_id, _ = validate_run_id_format(resource_id)
+        return tenant_id
+    except TenantFormatError:
+        return None
+
+
+def assert_tenant_owns_resource(tenant_id: str, resource_id: str) -> None:
+    extracted = extract_tenant_from_resource_id(resource_id)
+    if extracted is None:
+        raise TenantFormatError(
+            f"Cannot extract tenant from resource_id={resource_id!r}"
+        )
+    if extracted != tenant_id:
+        raise TenantMismatchError(
+            f"Tenant mismatch: authenticated={tenant_id!r} "
+            f"resource_owner={extracted!r} resource_id={resource_id!r}"
+        )
+
 
 class TenantMiddleware(BaseHTTPMiddleware):
-    """
-    Middleware for tenant isolation.
-
-    Features:
-    - Extracts tenant ID from X-Tenant-ID header
-    - Validates tenant ID format
-    - Verifies resource ownership for POST requests
-    """
-
-    def __init__(self, app):
+    def __init__(
+        self,
+        app: ASGIApp,
+        skip_paths: Optional[set[str]] = None,
+        require_run_id: bool = False,
+    ) -> None:
         super().__init__(app)
-        self._tenant_pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_.-]{2,98}[a-zA-Z0-9]$')
+        self._skip_paths = skip_paths or {
+            "/health",
+            "/metrics",
+            "/docs",
+            "/openapi.json",
+        }
+        self._require_run_id = require_run_id
+        logger.info(
+            "TenantMiddleware initialised: skip_paths=%s require_run_id=%s",
+            self._skip_paths,
+            require_run_id,
+        )
 
-    async def dispatch(self, request: Request, call_next):
-        # Extract tenant ID from header
-        tenant_id = _header_get(request.headers, "x-tenant-id")
-        if not tenant_id:
-            raise HTTPException(400, "X-Tenant-ID header required")
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        for skip in self._skip_paths:
+            if request.url.path.startswith(skip):
+                return await call_next(request)
 
-        # Validate tenant ID format
-        if not self._tenant_pattern.match(tenant_id):
-            raise HTTPException(400, "X-Tenant-ID contains invalid characters")
+        try:
+            tenant_id, run_id, source = self._extract_tenant(request)
+        except TenantMissingError as exc:
+            logger.warning("Tenant missing: %s path=%s", exc, request.url.path)
+            return Response(
+                content=f"Missing tenant identification: {exc}",
+                status_code=400,
+            )
+        except (TenantFormatError, TenantMismatchError) as exc:
+            logger.warning("Tenant validation failed: %s", exc)
+            return Response(
+                content=f"Tenant validation failed: {exc}",
+                status_code=403,
+            )
+        except Exception as exc:
+            logger.error("Unexpected error in TenantMiddleware: %s", exc, exc_info=True)
+            return Response(content="Internal server error", status_code=500)
 
-        # Store in request state
-        request.state.tenant_id = tenant_id
+        if self._require_run_id and not run_id:
+            logger.warning("run_id required but missing: path=%s", request.url.path)
+            return Response(content="X-Run-Id header required", status_code=400)
 
-        # For POST requests, verify ownership
-        if request.method == "POST":
-            await self._verify_ownership(request, tenant_id)
+        request.state.tenant = TenantContext(
+            tenant_id=tenant_id,
+            run_id=run_id,
+            source=source,
+        )
 
-        # Process request
         response = await call_next(request)
-        response.headers["X-Tenant-ID"] = tenant_id
+        response.headers["X-Tenant-Id"] = tenant_id
         return response
 
-    async def _verify_ownership(self, request: Request, tenant_id: str):
-        """Verify that resources in request body belong to tenant."""
-        try:
-            body = await request.json()
-        except Exception:
-            return  # No JSON body, skip ownership check
+    def _extract_tenant(self, request: Request) -> tuple[str, Optional[str], str]:
+        headers = getattr(request, "headers", None)
+        path_params = getattr(request, "path_params", {}) or {}
 
-        # Check run_id fields
-        for field in ["run_id", "plan_id", "code_set_id"]:
-            if field in body:
-                resource_id = body[field]
-                if resource_id and not await self._check_ownership(resource_id, tenant_id):
-                    raise HTTPException(
-                        403,
-                        f"{field} '{resource_id}' does not belong to tenant '{tenant_id}'"
+        run_id: Optional[str] = _header_get(headers, _RUN_ID_HEADER)
+        header_tenant = _header_get(headers, _TENANT_HEADER)
+
+        # 1) explicit tenant header
+        if header_tenant:
+            self._validate_format(header_tenant)
+
+            if run_id:
+                extracted, _ = validate_run_id_format(run_id)
+                if extracted != header_tenant:
+                    raise TenantMismatchError(
+                        f"X-Tenant-Id {header_tenant!r} does not match run_id owner {extracted!r}"
                     )
+            return header_tenant, run_id, "header"
 
-    async def _check_ownership(self, resource_id: str, tenant_id: str) -> bool:
-        """Check if resource belongs to tenant."""
-        try:
-            # Try to parse as run-id
-            if resource_id.startswith("run-"):
-                parsed = validate_run_id_format(resource_id, tenant_id)
-                return parsed.tenant_id == tenant_id
-        except TenantFormatError:
-            pass
+        # 2) derive from run-id header
+        if run_id:
+            extracted, _ = validate_run_id_format(run_id)
+            self._validate_format(extracted)
+            return extracted, run_id, "run_id_header"
 
-        # For other resource types, check prefix
-        if resource_id.startswith(f"plan-{tenant_id}-"):
-            return True
-        if resource_id.startswith(f"code-{tenant_id}-"):
-            return True
+        # 3) explicit tenant path param
+        if "tenant_id" in path_params:
+            tenant_id = path_params["tenant_id"]
+            self._validate_format(tenant_id)
 
-        return False
+            path_run_id = path_params.get("run_id")
+            if path_run_id:
+                extracted, _ = validate_run_id_format(path_run_id)
+                if extracted != tenant_id:
+                    raise TenantMismatchError(
+                        f"Path tenant_id {tenant_id!r} does not match run_id owner {extracted!r}"
+                    )
+            return tenant_id, path_run_id, "path_param"
+
+        # 4) derive from run-id path param
+        if "run_id" in path_params:
+            path_run = path_params["run_id"]
+            extracted, _ = validate_run_id_format(path_run)
+            self._validate_format(extracted)
+            return extracted, path_run, "path_run_id"
+
+        raise TenantMissingError(
+            f"No tenant identifier found in headers or path for {request.url.path!r}"
+        )
+
+    @staticmethod
+    def _validate_format(tenant_id: str) -> None:
+        if not is_valid_tenant_id(tenant_id):
+            raise TenantFormatError(
+                f"Invalid tenant_id format: {tenant_id!r} "
+                "(must match ^[a-zA-Z0-9][a-zA-Z0-9_.\\-]{1,98}[a-zA-Z0-9]$)"
+            )
 
 
-# ============================================================================
-# Export all public symbols
-# ============================================================================
-
-__all__ = [
-    "TenantMiddleware",
-    "ParsedRunId",
-    "TenantFormatError",
-    "_header_get",
-    "validate_run_id_format",
-]
+def get_tenant_context(request: Request) -> TenantContext:
+    ctx = getattr(request.state, "tenant", None)
+    if ctx is None:
+        raise RuntimeError(
+            "TenantContext not found on request.state — ensure TenantMiddleware is installed"
+        )
+    return ctx

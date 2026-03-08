@@ -1,5 +1,5 @@
 """
-hfa-tools/tests/test_budget_guard_atomic.py
+tests/test_budget_guard_atomic.py
 IRONCLAD — BudgetGuard atomic tests aligned with the real Sprint 2 API.
 
 Covers:
@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 
+# Guardian Notu: NameError hatasını çözen global sabitler buradadır.
 TENANT_ID = "acme_corp"
 RUN_ID = "run-acme_corp-550e8400-e29b-41d4-a716-446655440000"
 KEY_PREFIX = "budget"
