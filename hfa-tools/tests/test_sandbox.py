@@ -192,6 +192,11 @@ class TestSandboxPool:
             container.labels = {"hfa.language": "python", "hfa.created": "0"}
             container.reload = MagicMock()   # ✅ reload() present
 
+            # ✅ Guardian fix: Proper Mocking of Docker API to prevent _wipe_workspace fallback from failing
+            container.client.api.exec_create.return_value = {"Id": "exec-111"}
+            container.client.api.exec_start.return_value = b""
+            container.client.api.exec_inspect.return_value = {"ExitCode": 0}
+
             mock_docker.return_value.containers.run.return_value   = container
             mock_docker.return_value.containers.get.return_value   = container
 

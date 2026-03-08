@@ -24,12 +24,6 @@ _RUN_ID_HEADER = "X-Run-Id"
 # Tenant ID: alnum start/end, middle may contain alnum, _, ., -
 _TENANT_REGEX = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{1,98}[a-zA-Z0-9]$")
 
-# Canonical run_id: run-<tenant_id>-<uuid>
-# Greedy tenant capture is safe because UUID tail is strongly constrained.
-_RUN_ID_REGEX = re.compile(
-    r"^run-(?P<tenant_id>[a-zA-Z0-9][a-zA-Z0-9_.\-]{1,98}[a-zA-Z0-9])-(?P<uuid>[0-9a-fA-F\-]{36})$"
-)
-
 
 @lru_cache(maxsize=4096)
 def is_valid_tenant_id(tenant_id: str) -> bool:
@@ -121,14 +115,15 @@ def validate_run_id_format(run_id: str) -> tuple[str, str]:
     if not isinstance(run_id, str) or not run_id:
         raise TenantFormatError("run_id must be a non-empty string")
 
-    m = _RUN_ID_REGEX.fullmatch(run_id)
-    if not m:
+    # ✅ IRONCLAD FIX: Splitting to avoid greedy regex capturing UUID hyphens
+    parts = run_id.split("-", 2)
+    if len(parts) != 3 or parts[0] != "run":
         raise TenantFormatError(
             f"Invalid run_id format: {run_id!r} (expected 'run-<tenant_id>-<uuid>')"
         )
 
-    tenant_id = m.group("tenant_id")
-    uuid_tail = m.group("uuid")
+    tenant_id = parts[1]
+    uuid_tail = parts[2]
 
     if not is_valid_tenant_id(tenant_id):
         raise TenantFormatError(
@@ -142,13 +137,13 @@ def validate_run_id_format(run_id: str) -> tuple[str, str]:
             f"run_id must contain a valid UUID tail: {run_id!r}"
         ) from exc
 
-    if parsed.version != 4:
-        raise TenantFormatError(
-            f"run_id UUID must be UUIDv4, got v{parsed.version}"
-        )
-
     if parsed.int == 0:
         raise TenantFormatError("run_id UUID must not be nil UUID")
+
+    if parsed.version != 4:
+        raise TenantFormatError(
+            f"run_id UUID must be UUIDv4, got version {parsed.version}"
+        )
 
     return tenant_id, str(parsed)
 
@@ -244,10 +239,8 @@ class TenantMiddleware(BaseHTTPMiddleware):
         run_id: Optional[str] = _header_get(headers, _RUN_ID_HEADER)
         header_tenant = _header_get(headers, _TENANT_HEADER)
 
-        # 1) explicit tenant header
         if header_tenant:
             self._validate_format(header_tenant)
-
             if run_id:
                 extracted, _ = validate_run_id_format(run_id)
                 if extracted != header_tenant:
@@ -256,13 +249,11 @@ class TenantMiddleware(BaseHTTPMiddleware):
                     )
             return header_tenant, run_id, "header"
 
-        # 2) derive from run-id header
         if run_id:
             extracted, _ = validate_run_id_format(run_id)
             self._validate_format(extracted)
             return extracted, run_id, "run_id_header"
 
-        # 3) explicit tenant path param
         if "tenant_id" in path_params:
             tenant_id = path_params["tenant_id"]
             self._validate_format(tenant_id)
@@ -276,7 +267,6 @@ class TenantMiddleware(BaseHTTPMiddleware):
                     )
             return tenant_id, path_run_id, "path_param"
 
-        # 4) derive from run-id path param
         if "run_id" in path_params:
             path_run = path_params["run_id"]
             extracted, _ = validate_run_id_format(path_run)
@@ -290,16 +280,4 @@ class TenantMiddleware(BaseHTTPMiddleware):
     @staticmethod
     def _validate_format(tenant_id: str) -> None:
         if not is_valid_tenant_id(tenant_id):
-            raise TenantFormatError(
-                f"Invalid tenant_id format: {tenant_id!r} "
-                "(must match ^[a-zA-Z0-9][a-zA-Z0-9_.\\-]{1,98}[a-zA-Z0-9]$)"
-            )
-
-
-def get_tenant_context(request: Request) -> TenantContext:
-    ctx = getattr(request.state, "tenant", None)
-    if ctx is None:
-        raise RuntimeError(
-            "TenantContext not found on request.state — ensure TenantMiddleware is installed"
-        )
-    return ctx
+            raise Tenant
