@@ -65,11 +65,6 @@ class SandboxPool:
       - tmpfs on /tmp, /run, /workspace        ← IRONCLAD: both required
       - network_disabled=True
       - CPU + memory limits
-
-    Guardian fixes:
-      - _is_container_healthy calls container.reload() for fresh status
-      - get_container re-checks health at checkout time; removes dead IDs
-        and schedules refill so the pool never accumulates stale entries
     """
 
     PROFILES: dict[str, ContainerSpec] = {
@@ -95,7 +90,7 @@ class SandboxPool:
         self._warmup_interval = warmup_interval
         self._cleanup_interval = cleanup_interval
 
-        loop = asyncio.get_running_loop() if asyncio._get_running_loop() else None  # noqa
+        loop = asyncio.get_running_loop() if asyncio._get_running_loop() else None
         self._docker = docker.from_env()
 
         self._pool: dict[str, asyncio.Queue] = {
@@ -165,20 +160,6 @@ class SandboxPool:
     async def get_container(self, language: str) -> AsyncIterator[str]:
         """
         Checkout a healthy container; return or discard on exit.
-
-        On checkout the container is re-validated with container.reload()
-        so we never hand out a stale ID that was alive when enqueued but
-        has since died.
-
-        Args:
-            language: "python" | "node" | "python-test"
-
-        Yields:
-            container_id (str)
-
-        Raises:
-            ValueError: Unknown language.
-            RuntimeError: Container creation failed.
         """
         if language not in self.PROFILES:
             raise ValueError(f"Unsupported language: {language!r}")
@@ -203,7 +184,6 @@ class SandboxPool:
                     )
                     candidate = await self._create_container(language)
 
-                # ✅ Guardian fix: reload() before trusting .status
                 if await self._is_container_healthy(candidate):
                     container_id = candidate
                     break
@@ -221,8 +201,8 @@ class SandboxPool:
             if not wiped:
                 logger.warning("Workspace wipe failed for %s — removing container", container_id[:12])
                 await self._remove_container(container_id)
+                # ✅ Guardian Fix: DO NOT await self._pool.put() here, it causes DEADLOCK if queue is full
                 container_id = await self._create_container(language)
-                await self._pool[language].put(container_id)
                 wiped = await self._wipe_workspace(container_id)
                 if not wiped:
                     await self._remove_container(container_id)
@@ -330,12 +310,6 @@ class SandboxPool:
                 self._metadata.pop(container_id, None)
 
     async def _is_container_healthy(self, container_id: str) -> bool:
-        """
-        Check container liveness.
-
-        ✅ Guardian fix: calls container.reload() to get fresh state
-        instead of relying on the potentially-stale cached .status.
-        """
         loop = asyncio.get_running_loop()
         try:
             def _check():
@@ -352,24 +326,13 @@ class SandboxPool:
             )
             return False
 
-    
     async def _wipe_workspace(self, container_id: str) -> bool:
-        """
-        Wipe /workspace inside the container to prevent cross-run / cross-tenant leaks.
-
-        Policy:
-          - Fail-closed. If wipe fails, container must be discarded.
-          - Uses 'sh -lc' so it works on slim images.
-
-        Returns:
-            True if wipe succeeded, else False.
-        """
+        """Wipe /workspace inside the container to prevent cross-run / cross-tenant leaks."""
         loop = asyncio.get_running_loop()
         try:
             container = await loop.run_in_executor(
                 None, lambda: self._docker.containers.get(container_id)
             )
-            # Remove normal files + hidden files (best-effort)
             cmd = [
                 "sh", "-lc",
                 "rm -rf /workspace/* /workspace/.[!.]* /workspace/..?* 2>/dev/null || true"

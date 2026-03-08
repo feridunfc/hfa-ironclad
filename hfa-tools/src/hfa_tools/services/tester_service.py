@@ -159,10 +159,13 @@ class TesterService:
         """
         results: list[TestResult] = []
         for i, line in enumerate(stdout.splitlines()):
+            # ✅ Guardian Fix: test_id formatını validasyon kurallarına uygun hale getirdik
+            safe_id = f"test-result-{i:04d}"
+
             if " PASSED" in line:
                 name = line.split(" PASSED")[0].strip() or f"test_{i}"
                 results.append(TestResult(
-                    test_id=f"t{i}",
+                    test_id=safe_id,
                     name=name,
                     status="passed",
                     duration_ms=0,
@@ -170,7 +173,7 @@ class TesterService:
             elif " FAILED" in line:
                 name = line.split(" FAILED")[0].strip() or f"test_{i}"
                 results.append(TestResult(
-                    test_id=f"t{i}",
+                    test_id=safe_id,
                     name=name,
                     status="failed",
                     duration_ms=0,
@@ -179,7 +182,7 @@ class TesterService:
             elif " ERROR" in line:
                 name = line.split(" ERROR")[0].strip() or f"test_{i}"
                 results.append(TestResult(
-                    test_id=f"t{i}",
+                    test_id=safe_id,
                     name=name,
                     status="error",
                     duration_ms=0,
@@ -189,7 +192,7 @@ class TesterService:
         if not results:
             # No test lines found — treat as single pass/fail based on exit code
             results.append(TestResult(
-                test_id="t0",
+                test_id="test-result-fallback",
                 name="__default__",
                 status="passed" if exit_code == 0 else "error",
                 duration_ms=0,
