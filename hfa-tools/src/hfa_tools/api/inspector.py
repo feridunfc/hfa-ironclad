@@ -1,35 +1,64 @@
 """
 hfa-tools/src/hfa_tools/api/inspector.py
-IRONCLAD Sprint 6 — Run Inspector API
+IRONCLAD Sprint 7 — Run Inspector API (Sprint 6 → Sprint 7 upgrade)
 
-Exposes ExecutionGraph data via REST endpoints for UI consumption.
-Mounts at /v1/inspector (alongside /v1/execute).
+Sprint 6 baseline changes
+--------------------------
+Sprint 6 RunRegistry was memory-only: restart = data loss, no archive.
+Sprint 6 SSE had no heartbeat, no archived-run fallback, no disconnect guard.
+Sprint 6 summary had no created_at, so tenant lists sorted by run_id (wrong).
 
-Endpoints
----------
-GET  /v1/inspector/runs/{run_id}          — full graph snapshot
-GET  /v1/inspector/runs/{run_id}/nodes    — flat node list with status
-GET  /v1/inspector/runs/{run_id}/summary  — summary only (fast polling)
-GET  /v1/inspector/runs/{run_id}/events   — SSE stream for live updates
-GET  /v1/inspector/tenants/{tenant_id}/runs — list active runs for tenant
+Sprint 7 additions
+------------------
+RunRegistry (Faz 1 — Persistence)
+  ✅ Hybrid storage: live runs in _graphs (RAM), archived in Redis (JSON)
+  ✅ get_live_graph(run_id)       → RAM only; None if archived
+  ✅ get_snapshot(run_id)         → RAM first, Redis fallback; None if absent
+  ✅ get_tenant_run_summaries()   → active (RAM) + historical (Redis) merged
+  ✅ _normalize_summary()         → uniform shape regardless of source
+  ✅ created_at in every summary  → correct time-based sort, not run_id lex
+  ✅ _archive_run() uses redis.pipeline(transaction=True)  — atomic SET+ZADD
+  ✅ history_ttl_seconds param    → every archived key gets a TTL
+  ✅ archive failure → run stays in RAM, never silently evicted
+  ✅ Redis down → graceful degrade to RAM-only, no crash
 
-Design
-------
-* RunRegistry keeps a reference to all live ExecutionGraphs (injected from
-  RunOrchestrator._active_graphs at startup time).
-* SSE (Server-Sent Events) stream allows the UI to receive live node state
-  changes without polling.
-* Tenant isolation: requests must carry X-Tenant-ID; inspector only returns
-  graphs belonging to that tenant.
-* Pagination: list endpoints accept ?limit=N&cursor=<run_id>.
+SSE (Faz 3 — Resilience)
+  ✅ Heartbeat ": heartbeat" every 15 s → proxy timeout guard
+  ✅ is_disconnected() per loop  → no zombie generator on client drop
+  ✅ CancelledError re-raised    → clean server shutdown
+  ✅ Archived run → single "event: complete" then close immediately
+  ✅ Tenant mismatch → 403 before generator opens (fail-fast)
+  ✅ X-Accel-Buffering: no header
+
+Redis key schema
+----------------
+  hfa:run:{run_id}              STRING   JSON snapshot, TTL = history_ttl_seconds
+  hfa:tenant_runs:{tenant_id}   ZSET     member = run_id, score = created_at float
+
+Redis unavailable policy
+------------------------
+  get_snapshot():               log error → return None → caller raises 404
+  get_tenant_run_summaries():   log error → return RAM-only list
+  _archive_run():               returns False → cleanup skips eviction
+
+Mini Paket 2 hardening (Persistence Hardening)
+-----------------------------------------------
+  ✅ _archive_run() returns bool (True=success, False=failure) — no raise
+  ✅ _cleanup_loop evicts ONLY when archive returns True
+  ✅ get_snapshot(): JSON decode error handled separately from Redis error
+  ✅ _normalize_summary(): created_at fallback = 0.0 when source is missing it
+  ✅ SUMMARY_REQUIRED_FIELDS constant documents the guaranteed shape
+  ✅ Expired/TTL-expired history → 404 (same as never-existed; no tombstone)
+  ✅ Duplicate archive attempt is harmless (ZADD overwrites score idempotently)
+  ✅ All config params documented; no magic numbers
 
 IRONCLAD rules
 --------------
-* No print() — logging only.
-* No asyncio.get_event_loop().
-* close() is always safe to call.
-* 404 on unknown run_id (not 500).
-* Tenant mismatch → 403 (same as TenantMiddleware).
+  * No print() — logging only.
+  * No asyncio.get_event_loop() — get_running_loop() where needed.
+  * close() always safe to call multiple times.
+  * 404 / 403 / 400 / 503 — typed, never 500 from missing data.
+  * cost_cents: int — no float USD.
 """
 from __future__ import annotations
 
@@ -41,7 +70,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from hfa.obs.run_graph import ExecutionGraph, NodeStatus
 
@@ -52,10 +81,10 @@ router = APIRouter(prefix="/v1/inspector", tags=["inspector"])
 
 # ---------------------------------------------------------------------------
 # Response models
+# (Sprint 7 additions: GraphSummaryResponse.created_at, RunListItem.created_at)
 # ---------------------------------------------------------------------------
 
 class NodeResponse(BaseModel):
-    """Single node in the execution graph."""
     node_id:     str
     agent_type:  str
     status:      str
@@ -65,7 +94,7 @@ class NodeResponse(BaseModel):
     finished_at: Optional[float]
     duration_ms: Optional[float]
     tokens_used: int
-    cost_cents:  int
+    cost_cents:  int              # integer cents — no float USD
     error:       Optional[str]
     input_hash:  Optional[str]
     output_hash: Optional[str]
@@ -73,116 +102,391 @@ class NodeResponse(BaseModel):
 
 
 class GraphSummaryResponse(BaseModel):
-    """Lightweight summary for polling."""
-    run_id:          str
-    tenant_id:       str
-    total_nodes:     int
-    done:            int
-    failed:          int
-    running:         int
-    pending:         int
-    total_tokens:    int
+    run_id:           str
+    tenant_id:        str
+    created_at:       float       # ✅ Sprint 7: timestamp for correct sort order
+    total_nodes:      int
+    done:             int
+    failed:           int
+    running:          int
+    pending:          int
+    total_tokens:     int
     total_cost_cents: int
-    is_complete:     bool
-    has_failures:    bool
+    is_complete:      bool
+    has_failures:     bool
 
 
 class GraphResponse(BaseModel):
-    """Full graph snapshot including all nodes and edges."""
-    run_id:   str
+    run_id:    str
     tenant_id: str
-    nodes:    List[NodeResponse]
-    edges:    Dict[str, List[str]]
-    summary:  GraphSummaryResponse
+    nodes:     List[NodeResponse]
+    edges:     Dict[str, List[str]]
+    summary:   GraphSummaryResponse
 
 
 class RunListItem(BaseModel):
-    """Item in a tenant run list."""
-    run_id:      str
-    is_complete: bool
-    has_failures:bool
-    total_nodes: int
-    running:     int
+    run_id:       str
+    created_at:   float           # ✅ Sprint 7: for time-ordered tenant list
+    is_complete:  bool
+    has_failures: bool
+    total_nodes:  int
+    running:      int
 
 
 # ---------------------------------------------------------------------------
-# RunRegistry — shared reference to orchestrator graphs
+# Summary contract
+# ---------------------------------------------------------------------------
+
+# Every summary dict — regardless of source (live ExecutionGraph or Redis-archived
+# JSON blob) — must contain at least these fields after _normalize_summary().
+SUMMARY_REQUIRED_FIELDS: frozenset = frozenset({
+    "run_id", "tenant_id", "created_at",
+    "total_nodes", "done", "failed", "running", "pending",
+    "total_tokens", "total_cost_cents",
+    "is_complete", "has_failures",
+})
+
+
+def _normalize_summary(
+    raw:        Dict[str, Any],
+    run_id:     str,
+    tenant_id:  str,
+    created_at: Optional[float],
+) -> Dict[str, Any]:
+    """
+    Guarantee a consistent summary shape from any source.
+
+    Both live ExecutionGraph snapshots and Redis-archived JSON blobs pass
+    through here so callers never need to handle missing fields.
+
+    created_at:
+        If None, falls back to 0.0 (sorts to bottom of tenant list — safe,
+        not silent). A warning is logged so ops can detect this case.
+    run_id / tenant_id:
+        Always injected from caller — never trusted from ``raw``.
+
+    The resulting dict is guaranteed to satisfy SUMMARY_REQUIRED_FIELDS.
+    """
+    resolved_ts = created_at if created_at is not None else 0.0
+    if created_at is None:
+        logger.warning(
+            "_normalize_summary: created_at missing for run=%s, defaulting to 0.0",
+            run_id,
+        )
+    return {
+        "run_id":           run_id,
+        "tenant_id":        tenant_id,
+        "created_at":       resolved_ts,
+        "total_nodes":      raw.get("total_nodes", 0),
+        "done":             raw.get("done", 0),
+        "failed":           raw.get("failed", 0),
+        "running":          raw.get("running", 0),
+        "pending":          raw.get("pending", 0),
+        "total_tokens":     raw.get("total_tokens", 0),
+        "total_cost_cents": raw.get("total_cost_cents", 0),
+        "is_complete":      raw.get("is_complete", False),
+        "has_failures":     raw.get("has_failures", False),
+    }
+
+
+# ---------------------------------------------------------------------------
+# RunRegistry
 # ---------------------------------------------------------------------------
 
 class RunRegistry:
     """
-    In-process registry that maps run_id → ExecutionGraph.
+    Hybrid run registry: live runs in RAM, completed runs archived in Redis.
 
-    Injected at startup from RunOrchestrator._active_graphs.
-    Supports optional TTL-based cleanup of stale completed graphs.
+    Public API (contracts tested in test_sprint7_inspector.py)
+    -----------------------------------------------------------
+      register(graph)                     → add live graph (called from orchestrator)
+      get_live_graph(run_id)              → RAM only; None if archived or unknown
+      get_snapshot(run_id)               → RAM first, Redis fallback; None if absent
+      get_tenant_run_summaries(tenant)   → active + historical, newest first
+      list_by_tenant(tenant)             → sync RAM-only list (Sprint 6 compat)
 
-    Usage
-    -----
-        registry = RunRegistry(graphs=orchestrator._active_graphs)
-        # Pass to InspectorRouter at app creation
+    Internal layout
+    ---------------
+      _graphs:   Dict[run_id, ExecutionGraph]   — live runs
+      _added_at: Dict[run_id, float]            — registration timestamp
+      _redis:    Optional async Redis client
+      _history_ttl: int                         — TTL for archived Redis keys
+
+    Args
+    ----
+      graphs              Pre-populated dict from RunOrchestrator (optional).
+      max_age             Seconds before a complete graph is archive-eligible.
+      cleanup_interval    How often the background cleanup loop runs.
+      redis_client        Async Redis client; None = memory-only mode.
+      history_ttl_seconds TTL for archived Redis keys. Default: 7 days.
     """
 
+    _KEY_PREFIX = "hfa:run:"
+    _IDX_PREFIX = "hfa:tenant_runs:"
+
     def __init__(
-            self,
-            graphs: Optional[Dict[str, ExecutionGraph]] = None,
-            max_age: float = 3600.0,
-            cleanup_interval: float = 300.0,  # ✅ Guardian Fix: Dinamik interval eklendi
+        self,
+        graphs:               Optional[Dict[str, ExecutionGraph]] = None,
+        max_age:              float = 3600.0,
+        cleanup_interval:     float = 300.0,
+        redis_client:         Optional[Any] = None,
+        history_ttl_seconds:  int = 604_800,    # 7 days
     ) -> None:
-        self._graphs: Dict[str, ExecutionGraph] = graphs if graphs is not None else {}
-        self._max_age = max_age
-        self._cleanup_interval = cleanup_interval  # ✅ Konfigüre edilebilir süre saklanıyor
-        self._added_at: Dict[str, float] = {}
-        self._lock = asyncio.Lock()
+        self._graphs:       Dict[str, ExecutionGraph] = graphs if graphs is not None else {}
+        self._max_age       = max_age
+        self._interval      = cleanup_interval
+        self._redis         = redis_client
+        self._history_ttl   = history_ttl_seconds
+        self._added_at:     Dict[str, float] = {}
+        self._lock          = asyncio.Lock()
         self._cleanup_task: Optional[asyncio.Task] = None
+        logger.info(
+            "RunRegistry init: redis=%s max_age=%.0fs history_ttl=%ds",
+            "enabled" if redis_client else "disabled",
+            max_age,
+            history_ttl_seconds,
+        )
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Start background cleanup task."""
+        """Start background archive/cleanup loop."""
         loop = asyncio.get_running_loop()
         self._cleanup_task = loop.create_task(
             self._cleanup_loop(), name="inspector.registry.cleanup"
         )
+        logger.info("RunRegistry started")
 
     async def close(self) -> None:
+        """Cancel cleanup loop. Safe to call multiple times."""
         if self._cleanup_task:
             self._cleanup_task.cancel()
             try:
                 await self._cleanup_task
             except asyncio.CancelledError:
                 pass
+            self._cleanup_task = None
+
+    # ------------------------------------------------------------------
+    # Write
+    # ------------------------------------------------------------------
 
     async def register(self, graph: ExecutionGraph) -> None:
-        """Explicitly register a graph (for runs not managed by orchestrator)."""
+        """Register a live ExecutionGraph (called by RunOrchestrator)."""
         async with self._lock:
             self._graphs[graph.run_id]   = graph
             self._added_at[graph.run_id] = time.time()
 
-    def get(self, run_id: str) -> Optional[ExecutionGraph]:
+    # ------------------------------------------------------------------
+    # Read
+    # ------------------------------------------------------------------
+
+    def get_live_graph(self, run_id: str) -> Optional[ExecutionGraph]:
+        """
+        Return in-memory ExecutionGraph for SSE streaming.
+        Never queries Redis — returns None for archived or unknown runs.
+        """
         return self._graphs.get(run_id)
 
+    # Sprint 6 compatibility alias
+    def get(self, run_id: str) -> Optional[ExecutionGraph]:
+        return self.get_live_graph(run_id)
+
+    async def get_snapshot(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Hybrid lookup: RAM first, Redis fallback.
+
+        Returns a normalised snapshot dict, or None if absent everywhere.
+
+        Error handling:
+          Redis network error  → log + return None (→ 404, not 500)
+          JSON decode error    → log + return None (corrupt entry treated as absent)
+        """
+        # 1. RAM hit — always wins
+        g = self._graphs.get(run_id)
+        if g is not None:
+            created_at      = self._added_at.get(run_id, time.time())
+            snap            = g.snapshot()
+            snap["summary"] = _normalize_summary(
+                snap["summary"], run_id, g.tenant_id, created_at
+            )
+            return snap
+
+        # 2. Redis fallback
+        if self._redis is not None:
+            raw = None
+            try:
+                raw = await self._redis.get(f"{self._KEY_PREFIX}{run_id}")
+            except Exception as exc:
+                logger.error(
+                    "RunRegistry.get_snapshot redis error run=%s: %s", run_id, exc
+                )
+                return None   # Redis unavailable → treat as not-found
+
+            if raw is not None:
+                try:
+                    text = raw.decode() if isinstance(raw, bytes) else raw
+                    return json.loads(text)
+                except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                    logger.error(
+                        "RunRegistry.get_snapshot JSON decode error run=%s: %s",
+                        run_id, exc,
+                    )
+                    return None   # Corrupt entry → treat as not-found
+
+        return None
+
+
+    async def get_tenant_run_summaries(
+        self,
+        tenant_id: str,
+        limit:     int = 50,
+    ) -> List[Dict[str, Any]]:
+        """
+        Merge active (RAM) + historical (Redis) summaries for a tenant.
+
+        Rules:
+          * Sort by created_at descending (newest first).
+          * Active (RAM) wins on duplicate run_id.
+          * Redis error → log + return RAM-only (graceful degrade).
+        """
+        # Active (RAM) — authoritative source
+        active: Dict[str, Dict] = {}
+        for g in self._graphs.values():
+            if g.tenant_id == tenant_id:
+                ca            = self._added_at.get(g.run_id, time.time())
+                active[g.run_id] = _normalize_summary(
+                    g.snapshot()["summary"], g.run_id, tenant_id, ca
+                )
+
+        # Historical (Redis) — only for runs not currently in RAM
+        historical: Dict[str, Dict] = {}
+        if self._redis is not None:
+            try:
+                rids = await self._redis.zrevrange(
+                    f"{self._IDX_PREFIX}{tenant_id}", 0, limit - 1
+                )
+                if rids:
+                    keys = [
+                        f"{self._KEY_PREFIX}{r.decode() if isinstance(r, bytes) else r}"
+                        for r in rids
+                    ]
+                    raws = await self._redis.mget(keys)
+                    for raw in raws:
+                        if raw is None:
+                            continue
+                        snap = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+                        rid  = (
+                            snap.get("run_id")
+                            or snap.get("summary", {}).get("run_id")
+                        )
+                        if rid and rid not in active:
+                            historical[rid] = snap.get("summary", snap)
+            except Exception as exc:
+                logger.error(
+                    "RunRegistry.get_tenant_run_summaries redis error tenant=%s: %s",
+                    tenant_id, exc,
+                )
+                # Degrade: return RAM-only below
+
+        merged = {**historical, **active}   # active wins over historical
+        return sorted(
+            list(merged.values()),
+            key=lambda s: s.get("created_at", 0.0),
+            reverse=True,
+        )[:limit]
+
+    # Sprint 6 compat: sync RAM-only list
     def list_by_tenant(self, tenant_id: str, limit: int = 50) -> List[ExecutionGraph]:
-        graphs = [
-            g for g in self._graphs.values()
-            if g.tenant_id == tenant_id
-        ]
-        # Most recent first (by run_id lexicographic desc — UUID-based)
+        graphs = [g for g in self._graphs.values() if g.tenant_id == tenant_id]
         return sorted(graphs, key=lambda g: g.run_id, reverse=True)[:limit]
+
+    # ------------------------------------------------------------------
+    # Archive + cleanup
+    # ------------------------------------------------------------------
+
+    async def _archive_run(self, graph: ExecutionGraph, created_at: float) -> bool:
+        """
+        Persist snapshot to Redis atomically.
+
+        Uses pipeline(transaction=True): SET (snapshot) and ZADD (tenant index)
+        either both commit or neither does.
+
+        Returns True on success, False on failure.
+        Does NOT raise — caller checks return value and decides whether to evict.
+
+        Idempotency:
+            Calling twice for the same run_id is safe:
+            * SET overwrites the previous snapshot (last-write-wins).
+            * ZADD overwrites the score for the same member (no duplicates in ZSET).
+            This means duplicate archive attempts are harmless.
+
+        Expired entries (TTL elapsed):
+            Redis evicts the snapshot key automatically. The ZSET member
+            remains until a future ZADD or explicit cleanup. Callers will get
+            None from get_snapshot() which the endpoint surfaces as 404.
+        """
+        if self._redis is None:
+            return True   # memory-only mode: nothing to do, not a failure
+
+        snap            = graph.snapshot()
+        snap["summary"] = _normalize_summary(
+            snap["summary"], graph.run_id, graph.tenant_id, created_at
+        )
+
+        key     = f"{self._KEY_PREFIX}{graph.run_id}"
+        idx_key = f"{self._IDX_PREFIX}{graph.tenant_id}"
+        payload = json.dumps(snap)
+
+        try:
+            async with self._redis.pipeline(transaction=True) as pipe:
+                pipe.set(key, payload, ex=self._history_ttl)       # TTL on every key
+                pipe.zadd(idx_key, {graph.run_id: created_at})     # score = timestamp
+                await pipe.execute()
+            logger.info(
+                "RunRegistry archived: run=%s tenant=%s ttl=%ds",
+                graph.run_id, graph.tenant_id, self._history_ttl,
+            )
+            return True
+        except Exception as exc:
+            logger.error(
+                "RunRegistry._archive_run FAILED run=%s "
+                "(stays in RAM until next cycle): %s",
+                graph.run_id, exc,
+            )
+            return False
 
     async def _cleanup_loop(self) -> None:
         while True:
             try:
-                await asyncio.sleep(self._cleanup_interval)  # ✅ Sabit 300 yerine değişken kullanıyor
-                now = time.time()
+                await asyncio.sleep(self._interval)
+                now   = time.time()
+                stale = []
                 async with self._lock:
-                    stale = [
-                        rid for rid, added in self._added_at.items()
-                        if now - added > self._max_age and self._graphs.get(rid) and
-                           self._graphs[rid].is_complete()
-                    ]
-                    for rid in stale:
-                        self._graphs.pop(rid, None)
-                        self._added_at.pop(rid, None)
-                if stale:
-                    logger.info("RunRegistry: cleaned %d stale completed graphs", len(stale))
+                    for rid, added in list(self._added_at.items()):
+                        g = self._graphs.get(rid)
+                        if g and g.is_complete() and now - added > self._max_age:
+                            stale.append((g, added))
+
+                evicted = 0
+                for g, added in stale:
+                    archived = await self._archive_run(g, added)  # bool, never raises
+                    if archived:
+                        async with self._lock:
+                            self._graphs.pop(g.run_id, None)
+                            self._added_at.pop(g.run_id, None)
+                        evicted += 1
+                    else:
+                        logger.warning(
+                            "RunRegistry: skipping eviction for run=%s (archive failed)",
+                            g.run_id,
+                        )
+
+                if evicted:
+                    logger.info("RunRegistry: archived+evicted %d graphs", evicted)
+
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -200,13 +504,21 @@ def _get_registry(request: Request) -> RunRegistry:
     return registry
 
 
-def _require_graph(registry: RunRegistry, run_id: str, tenant_id: str) -> ExecutionGraph:
-    graph = registry.get(run_id)
-    if graph is None:
+async def _require_snapshot(
+    registry:  RunRegistry,
+    run_id:    str,
+    tenant_id: str,
+) -> Dict[str, Any]:
+    """
+    Async equivalent of Sprint 6 _require_graph; supports archived runs.
+    404 if absent, 403 if tenant mismatch.
+    """
+    snap = await registry.get_snapshot(run_id)
+    if snap is None:
         raise HTTPException(404, f"Run {run_id!r} not found")
-    if graph.tenant_id != tenant_id:
+    if snap.get("tenant_id") != tenant_id:
         raise HTTPException(403, f"Run {run_id!r} does not belong to your tenant")
-    return graph
+    return snap
 
 
 def _require_tenant(x_tenant_id: Optional[str]) -> str:
@@ -219,7 +531,8 @@ def _require_tenant(x_tenant_id: Optional[str]) -> str:
 # Response builders
 # ---------------------------------------------------------------------------
 
-def _node_response(node) -> NodeResponse:
+def _node_resp(node) -> NodeResponse:
+    """Build NodeResponse from GraphNode object."""
     return NodeResponse(
         node_id     = node.node_id,
         agent_type  = node.agent_type,
@@ -238,91 +551,66 @@ def _node_response(node) -> NodeResponse:
     )
 
 
-def _summary_response(graph: ExecutionGraph) -> GraphSummaryResponse:
-    snap = graph.snapshot()["summary"]
-    return GraphSummaryResponse(
-        run_id           = graph.run_id,
-        tenant_id        = graph.tenant_id,
-        total_nodes      = snap["total_nodes"],
-        done             = snap["done"],
-        failed           = snap["failed"],
-        running          = snap["running"],
-        pending          = snap["pending"],
-        total_tokens     = snap["total_tokens"],
-        total_cost_cents = snap["total_cost_cents"],
-        is_complete      = snap["is_complete"],
-        has_failures     = snap["has_failures"],
-    )
-
-
-def _graph_response(graph: ExecutionGraph) -> GraphResponse:
-    snap  = graph.snapshot()
-    nodes = [_node_response(graph.get_node(n["node_id"])) for n in snap["nodes"]]
-    edges = {k: list(v) for k, v in snap["edges"].items()}
+def _graph_resp_from_snap(snap: Dict[str, Any]) -> GraphResponse:
+    """Build GraphResponse from a normalised snapshot dict (live or archived)."""
+    nodes = []
+    for nd in snap.get("nodes", []):
+        try:
+            nodes.append(NodeResponse(**nd))
+        except Exception as exc:
+            logger.warning("NodeResponse parse error (skipped): %s", exc)
     return GraphResponse(
-        run_id    = graph.run_id,
-        tenant_id = graph.tenant_id,
+        run_id    = snap["run_id"],
+        tenant_id = snap["tenant_id"],
         nodes     = nodes,
-        edges     = edges,
-        summary   = _summary_response(graph),
+        edges     = {k: list(v) for k, v in snap.get("edges", {}).items()},
+        summary   = GraphSummaryResponse(**snap["summary"]),
     )
 
 
 # ---------------------------------------------------------------------------
-# Endpoints
+# Endpoints  (Sprint 7: all REST endpoints now use async _require_snapshot)
 # ---------------------------------------------------------------------------
 
 @router.get("/runs/{run_id}", response_model=GraphResponse)
 async def get_run_graph(
-    run_id:       str,
-    request:      Request,
-    x_tenant_id:  Optional[str] = Header(None),
+    run_id:      str,
+    request:     Request,
+    x_tenant_id: Optional[str] = Header(None),
 ) -> GraphResponse:
-    """
-    Return full execution graph for a run.
-
-    The graph includes all nodes (PENDING/RUNNING/DONE/FAILED),
-    edges (dependencies), and summary metrics.
-
-    Raises:
-        404: run_id not found.
-        403: run_id belongs to a different tenant.
-        400: X-Tenant-ID header missing.
-    """
+    """Full graph snapshot — live or archived. 404/403/400 as appropriate."""
     tenant_id = _require_tenant(x_tenant_id)
     registry  = _get_registry(request)
-    graph     = _require_graph(registry, run_id, tenant_id)
-    return _graph_response(graph)
+    snap      = await _require_snapshot(registry, run_id, tenant_id)
+    return _graph_resp_from_snap(snap)
 
 
 @router.get("/runs/{run_id}/nodes", response_model=List[NodeResponse])
 async def get_run_nodes(
     run_id:      str,
     request:     Request,
-    status:      Optional[str] = Query(None, description="Filter by status"),
+    status:      Optional[str] = Query(None),
     x_tenant_id: Optional[str] = Header(None),
 ) -> List[NodeResponse]:
-    """
-    Return flat list of nodes in the execution graph.
-
-    Args:
-        status: Optional filter ("pending", "running", "done", "failed").
-    """
+    """Flat node list, optionally filtered by status."""
     tenant_id = _require_tenant(x_tenant_id)
     registry  = _get_registry(request)
-    graph     = _require_graph(registry, run_id, tenant_id)
+    snap      = await _require_snapshot(registry, run_id, tenant_id)
 
-    snap  = graph.snapshot()
-    nodes = [graph.get_node(n["node_id"]) for n in snap["nodes"]]
+    nodes = []
+    for nd in snap.get("nodes", []):
+        try:
+            nodes.append(NodeResponse(**nd))
+        except Exception:
+            pass
 
     if status:
         try:
-            filter_status = NodeStatus(status)
-            nodes = [n for n in nodes if n.status == filter_status]
+            NodeStatus(status)
+            nodes = [n for n in nodes if n.status == status]
         except ValueError:
-            raise HTTPException(400, f"Invalid status filter: {status!r}")
-
-    return [_node_response(n) for n in nodes]
+            raise HTTPException(400, f"Invalid status: {status!r}")
+    return nodes
 
 
 @router.get("/runs/{run_id}/summary", response_model=GraphSummaryResponse)
@@ -331,16 +619,39 @@ async def get_run_summary(
     request:     Request,
     x_tenant_id: Optional[str] = Header(None),
 ) -> GraphSummaryResponse:
-    """
-    Lightweight summary endpoint for fast UI polling.
-
-    Returns only aggregate counts and completion status — no node details.
-    Designed for <5ms response under load.
-    """
+    """Lightweight summary — designed for fast polling (<5 ms)."""
     tenant_id = _require_tenant(x_tenant_id)
     registry  = _get_registry(request)
-    graph     = _require_graph(registry, run_id, tenant_id)
-    return _summary_response(graph)
+    snap      = await _require_snapshot(registry, run_id, tenant_id)
+    return GraphSummaryResponse(**snap["summary"])
+
+
+@router.get("/tenants/{tenant_id}/runs", response_model=List[RunListItem])
+async def list_tenant_runs(
+    tenant_id:   str,
+    request:     Request,
+    limit:       int = Query(50, ge=1, le=200),
+    x_tenant_id: Optional[str] = Header(None),
+) -> List[RunListItem]:
+    """Active + historical runs for a tenant, newest first."""
+    requesting = _require_tenant(x_tenant_id)
+    if requesting != tenant_id:
+        raise HTTPException(403, "Cannot access another tenant's runs")
+
+    registry  = _get_registry(request)
+    summaries = await registry.get_tenant_run_summaries(tenant_id, limit=limit)
+
+    return [
+        RunListItem(
+            run_id       = s["run_id"],
+            created_at   = s.get("created_at", 0.0),
+            is_complete  = s.get("is_complete", False),
+            has_failures = s.get("has_failures", False),
+            total_nodes  = s.get("total_nodes", 0),
+            running      = s.get("running", 0),
+        )
+        for s in summaries
+    ]
 
 
 @router.get("/runs/{run_id}/events")
@@ -351,93 +662,77 @@ async def stream_run_events(
     interval_ms: int = Query(500, ge=100, le=5000),
 ) -> StreamingResponse:
     """
-    Server-Sent Events stream for live run graph updates.
+    SSE stream for live run graph updates.
 
-    The client receives a SSE message whenever node state changes.
-    The stream closes automatically when the run completes.
-
-    Usage (JavaScript):
-        const es = new EventSource(`/v1/inspector/runs/${runId}/events`, {
-            headers: { "X-Tenant-ID": tenantId }
-        });
-        es.onmessage = (e) => {
-            const summary = JSON.parse(e.data);
-            updateUI(summary);
-        };
-
-    Args:
-        interval_ms: Polling interval in milliseconds (100–5000).
+    Sprint 7 resilience:
+      * Heartbeat ": heartbeat" every 15 s — proxy timeout guard.
+      * is_disconnected() per loop — no zombie generator on client drop.
+      * CancelledError re-raised — clean server shutdown.
+      * Archived run → single "event: complete" then close.
+      * Tenant mismatch → 403 raised before generator opens.
     """
-    tenant_id = _require_tenant(x_tenant_id)
-    registry  = _get_registry(request)
-    graph     = _require_graph(registry, run_id, tenant_id)
+    tenant_id  = _require_tenant(x_tenant_id)
+    registry   = _get_registry(request)
+    live_graph = registry.get_live_graph(run_id)
 
-    async def event_generator() -> AsyncGenerator[str, None]:
-        prev_snapshot = None
-        while True:
-            # Check if client disconnected
-            if await request.is_disconnected():
-                logger.debug("SSE client disconnected: run=%s", run_id)
-                break
+    # Fail-fast tenant check before stream opens
+    if live_graph is not None and live_graph.tenant_id != tenant_id:
+        raise HTTPException(403, "Tenant mismatch")
 
-            snap = graph.snapshot()
-            summary = snap["summary"]
+    async def _generate() -> AsyncGenerator[str, None]:
+        # Archived path: single snapshot event then close
+        if live_graph is None:
+            snap = await _require_snapshot(registry, run_id, tenant_id)
+            yield (
+                f"event: complete\n"
+                f"data: {json.dumps(snap['summary'], separators=(',', ':'))}\n\n"
+            )
+            return
 
-            # Only send if state changed
-            summary_json = json.dumps(summary, separators=(",", ":"))
-            if summary_json != prev_snapshot:
-                prev_snapshot = summary_json
-                yield f"data: {summary_json}\n\n"
+        # Live path: stream until complete or client disconnects
+        prev_json:         Optional[str] = None
+        heartbeat_interval               = 15.0   # seconds
+        last_yield_ts                    = time.time()
 
-            if summary["is_complete"]:
-                # Send final event then close
-                yield f"event: complete\ndata: {summary_json}\n\n"
-                break
+        try:
+            while True:
+                if await request.is_disconnected():
+                    logger.info("SSE client disconnected: run=%s", run_id)
+                    break
 
-            await asyncio.sleep(interval_ms / 1000)
+                snap         = live_graph.snapshot()
+                summary      = snap["summary"]
+                summary_json = json.dumps(summary, separators=(",", ":"))
+                now          = time.time()
+
+                if summary_json != prev_json:
+                    prev_json     = summary_json
+                    yield f"data: {summary_json}\n\n"
+                    last_yield_ts = now
+                elif now - last_yield_ts > heartbeat_interval:
+                    yield ": heartbeat\n\n"
+                    last_yield_ts = now
+
+                if summary["is_complete"]:
+                    yield (
+                        f"event: complete\n"
+                        f"data: {summary_json}\n\n"
+                    )
+                    break
+
+                await asyncio.sleep(interval_ms / 1000)
+
+        except asyncio.CancelledError:
+            logger.info("SSE cancelled (server shutdown): run=%s", run_id)
+            raise   # propagate — do not swallow
 
     return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
+        _generate(),
+        media_type = "text/event-stream",
+        headers    = {
             "Cache-Control":               "no-cache",
+            "Connection":                  "keep-alive",
             "X-Accel-Buffering":           "no",
             "Access-Control-Allow-Origin": "*",
         },
     )
-
-
-@router.get("/tenants/{tenant_id}/runs", response_model=List[RunListItem])
-async def list_tenant_runs(
-    tenant_id:   str,
-    request:     Request,
-    limit:       int = Query(50, ge=1, le=200),
-    x_tenant_id: Optional[str] = Header(None),
-) -> List[RunListItem]:
-    """
-    List active and recently completed runs for a tenant.
-
-    Returns runs ordered by run_id descending (most recent first).
-    Only returns runs belonging to the requesting tenant.
-
-    Args:
-        limit: Maximum number of runs to return (1–200).
-    """
-    requesting_tenant = _require_tenant(x_tenant_id)
-    # Tenant can only see their own runs
-    if requesting_tenant != tenant_id:
-        raise HTTPException(403, "Cannot access another tenant's runs")
-
-    registry = _get_registry(request)
-    graphs   = registry.list_by_tenant(tenant_id, limit=limit)
-
-    return [
-        RunListItem(
-            run_id       = g.run_id,
-            is_complete  = g.is_complete(),
-            has_failures = g.has_failures(),
-            total_nodes  = len(g.snapshot()["nodes"]),
-            running      = g.snapshot()["summary"]["running"],
-        )
-        for g in graphs
-    ]
