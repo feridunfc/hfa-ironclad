@@ -1,46 +1,22 @@
 """
 hfa-tools/src/hfa_tools/sandbox/distributed_pool.py
-IRONCLAD Sprint 6 — DistributedSandboxPool
+IRONCLAD Sprint 7 Faz 2 + Sprint 8 Mini 3 — DistributedSandboxPool + Tracing
 
-Architecture
-------------
-Sprint 3 introduced SandboxPool — a single-node Docker pool.
-Sprint 6 extends this to a cluster:
-
-    DistributedSandboxPool
-        ├── SandboxNode[]          — discovered via Redis registry
-        ├── NodeSelector           — weighted round-robin with health filter
-        ├── NodeHealthMonitor      — periodic ping, evicts unresponsive nodes
-        └── SandboxNode.execute()  — delegates to the node's Docker API
-
-Node discovery
---------------
-Nodes register themselves in Redis on startup:
-    HSET "sandbox:nodes" "{node_id}" "{json: host, port, capacity, ...}"
-    EXPIRE "sandbox:nodes:{node_id}" 60   # heartbeat TTL
-
-NodeHealthMonitor polls nodes every `health_interval` seconds and marks
-unhealthy nodes as unavailable. Unhealthy nodes are excluded from selection
-but remain in the registry — they recover automatically if heartbeat resumes.
+Sprint 7: HFAMetrics slot telemetry
+Sprint 8 Mini 3: OTel tracing
+  ✅ hfa.sandbox.execute span in execute() — per-execution span
+  ✅ Attributes: hfa.run_id, hfa.language, hfa.node_id
+  ✅ Success: exit_code attribute set, span status OK
+  ✅ Failure: exception recorded, span status ERROR, node degraded
+  ✅ Slot metrics (inc/dec) still in finally — tracing does not change slot contract
 
 IRONCLAD rules
 --------------
-* No print() — logging only.
-* No asyncio.get_event_loop() — get_running_loop() where needed.
-* close() cancels monitor task and drains active executions.
-* Fail-closed: if all nodes are unhealthy, raises SandboxClusterError.
-* Node selection is deterministic under equal load (stable sort on node_id).
-* No silent exception swallowing — all errors are logged with context.
-
-Execution flow
---------------
-    acquire node (weighted round-robin, health filter)
-        ↓
-    run_in_container(code, language, timeout)
-        ↓
-    return SandboxResult
-        ↓
-    release node slot
+* No print() -- logging only.
+* No asyncio.get_event_loop() -- get_running_loop() where needed.
+* Slot counter always released in finally (no leaks on failure).
+* Fail-closed: SandboxClusterError when no healthy nodes.
+* close() always safe.
 """
 from __future__ import annotations
 
@@ -48,13 +24,15 @@ import asyncio
 import json
 import logging
 import time
-import uuid
-from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
+from hfa.obs.metrics import HFAMetrics              # Sprint 7 Faz 2
+from hfa.obs.tracing import get_tracer, HFATracing  # Sprint 8 Mini 3
+
+logger  = logging.getLogger(__name__)
+_tracer = get_tracer("hfa.sandbox")
 
 
 # ---------------------------------------------------------------------------
@@ -69,32 +47,17 @@ class NodeHealth(str, Enum):
 
 @dataclass
 class SandboxNode:
-    """
-    Represents a single sandbox execution node.
-
-    Attributes
-    ----------
-    node_id:    Unique node identifier (e.g. "sandbox-node-01").
-    host:       Docker API host (e.g. "172.16.0.10").
-    port:       Docker API port (default 2376 for TLS).
-    capacity:   Maximum concurrent containers on this node.
-    languages:  Supported language runtimes.
-    health:     Current health status.
-    active:     Number of currently running containers.
-    last_seen:  Unix timestamp of last heartbeat.
-    weight:     Routing weight (higher = more traffic). Set by admin.
-    labels:     Arbitrary key-value metadata (region, tier, etc.).
-    """
+    """Single node in the distributed sandbox cluster."""
     node_id:   str
     host:      str
-    port:      int              = 2376
-    capacity:  int              = 10
-    languages: List[str]        = field(default_factory=lambda: ["python", "node"])
-    health:    NodeHealth       = NodeHealth.HEALTHY
-    active:    int              = 0
-    last_seen: float            = field(default_factory=time.time)
-    weight:    int              = 10
-    labels:    Dict[str, str]   = field(default_factory=dict)
+    port:      int            = 2376
+    capacity:  int            = 10
+    languages: List[str]      = field(default_factory=lambda: ["python", "node"])
+    health:    NodeHealth     = NodeHealth.HEALTHY
+    active:    int            = 0
+    last_seen: float          = field(default_factory=time.time)
+    weight:    int            = 10
+    labels:    Dict[str, str] = field(default_factory=dict)
 
     @property
     def available_slots(self) -> int:
@@ -106,7 +69,6 @@ class SandboxNode:
 
     @property
     def load_factor(self) -> float:
-        """0.0 (idle) to 1.0 (full)."""
         if self.capacity == 0:
             return 1.0
         return self.active / self.capacity
@@ -129,7 +91,6 @@ class SandboxNode:
 
 @dataclass(frozen=True)
 class SandboxResult:
-    """Result of a sandboxed code execution."""
     run_id:      str
     node_id:     str
     language:    str
@@ -149,12 +110,10 @@ class SandboxResult:
 # ---------------------------------------------------------------------------
 
 class SandboxClusterError(Exception):
-    """No healthy nodes available."""
-
+    """No healthy nodes available (fail-closed)."""
     def __init__(self, language: str, node_count: int) -> None:
         super().__init__(
-            f"No healthy sandbox nodes for language={language!r} "
-            f"(total_nodes={node_count})"
+            f"No healthy nodes for language={language!r} (total={node_count})"
         )
         self.language   = language
         self.node_count = node_count
@@ -165,54 +124,26 @@ class SandboxExecutionError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# NodeSelector — weighted round-robin with health filter
+# NodeSelector
 # ---------------------------------------------------------------------------
 
 class NodeSelector:
     """
-    Select the best available node for a given language.
-
-    Algorithm: weighted round-robin filtered by health + language support.
-    Among nodes with equal (weight * available_slots), prefer lower load_factor.
-    Stable sort on node_id for deterministic tie-breaking.
-
-    Usage:
-        selector = NodeSelector()
-        node = selector.select(nodes, language="python")
+    Weighted round-robin node selection.
+    Filter: health==HEALTHY AND language supported.
+    Sort: load_factor ASC, then node_id ASC (stable tie-break).
+    Among equal load_factor, prefer higher weight.
     """
 
-    def select(
-        self,
-        nodes:    List[SandboxNode],
-        language: str,
-    ) -> SandboxNode:
-        """
-        Select optimal node.
-
-        Args:
-            nodes:    All registered nodes (healthy and unhealthy).
-            language: Required runtime language.
-
-        Returns:
-            Best SandboxNode.
-
-        Raises:
-            SandboxClusterError: No eligible healthy nodes.
-        """
+    def select(self, nodes: List[SandboxNode], language: str) -> SandboxNode:
         eligible = [
             n for n in nodes
             if n.is_available and language in n.languages
         ]
         if not eligible:
             raise SandboxClusterError(language, len(nodes))
-
-        # Sort: lower load_factor first, then by node_id for determinism
-        eligible.sort(key=lambda n: (n.load_factor, n.node_id))
-        # Apply weight: nodes with higher weight appear multiple times in virtual ring
-        # Simplified: select from top-weighted eligible nodes
-        max_weight = max(n.weight for n in eligible)
-        top = [n for n in eligible if n.weight == max_weight]
-        return top[0]  # lowest load among max-weight nodes
+        eligible.sort(key=lambda n: (n.load_factor, -n.weight, n.node_id))
+        return eligible[0]
 
 
 # ---------------------------------------------------------------------------
@@ -220,72 +151,50 @@ class NodeSelector:
 # ---------------------------------------------------------------------------
 
 class NodeHealthMonitor:
-    """
-    Background task that pings registered nodes and updates health status.
+    """Background task: HEALTHY -> DEGRADED -> UNHEALTHY based on heartbeat age."""
 
-    Unhealthy threshold: node.last_seen > stale_threshold_seconds ago.
-    Degraded threshold: stale_threshold_seconds / 2.
-
-    Args:
-        stale_threshold: Seconds without heartbeat → UNHEALTHY.
-        check_interval:  How often to scan all nodes (seconds).
-    """
-
-    def __init__(
-        self,
-        stale_threshold: float = 30.0,
-        check_interval:  float = 10.0,
-    ) -> None:
-        self._stale_threshold = stale_threshold
-        self._degraded_threshold = stale_threshold / 2
-        self._check_interval = check_interval
-        self._task: Optional[asyncio.Task] = None
-        self._running = False
+    def __init__(self, stale_threshold: float = 30.0, check_interval: float = 10.0) -> None:
+        self._stale     = stale_threshold
+        self._degraded  = stale_threshold / 2
+        self._interval  = check_interval
+        self._task:     Optional[asyncio.Task] = None
+        self._nodes:    Dict[str, SandboxNode] = {}
 
     def start(self, nodes: Dict[str, SandboxNode]) -> None:
-        """Start monitor background task. `nodes` is a shared reference."""
-        self._nodes   = nodes
-        self._running = True
-        loop = asyncio.get_running_loop()
-        self._task = loop.create_task(
-            self._monitor_loop(), name="sandbox.health_monitor"
+        self._nodes = nodes
+        loop        = asyncio.get_running_loop()
+        self._task  = loop.create_task(
+            self._loop(), name="sandbox.health_monitor"
         )
         logger.info("NodeHealthMonitor started")
 
     async def stop(self) -> None:
-        self._running = False
         if self._task:
             self._task.cancel()
             try:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        logger.info("NodeHealthMonitor stopped")
+        self._task = None
 
-    async def _monitor_loop(self) -> None:
-        while self._running:
+    async def _loop(self) -> None:
+        while True:
             try:
-                await asyncio.sleep(self._check_interval)
+                await asyncio.sleep(self._interval)
                 now = time.time()
                 for node in self._nodes.values():
                     age = now - node.last_seen
-                    if age > self._stale_threshold:
+                    if age > self._stale:
                         if node.health != NodeHealth.UNHEALTHY:
-                            logger.warning(
-                                "Node UNHEALTHY: node=%s age=%.0fs", node.node_id, age
-                            )
+                            logger.warning("Node UNHEALTHY: %s age=%.0fs", node.node_id, age)
                         node.health = NodeHealth.UNHEALTHY
-                    elif age > self._degraded_threshold:
+                    elif age > self._degraded:
                         if node.health == NodeHealth.HEALTHY:
-                            logger.warning(
-                                "Node DEGRADED: node=%s age=%.0fs", node.node_id, age
-                            )
+                            logger.warning("Node DEGRADED: %s age=%.0fs", node.node_id, age)
                         node.health = NodeHealth.DEGRADED
                     else:
                         if node.health != NodeHealth.HEALTHY:
-                            logger.info(
-                                "Node RECOVERED: node=%s", node.node_id
-                            )
+                            logger.info("Node RECOVERED: %s", node.node_id)
                         node.health = NodeHealth.HEALTHY
             except asyncio.CancelledError:
                 break
@@ -299,62 +208,35 @@ class NodeHealthMonitor:
 
 class DistributedSandboxPool:
     """
-    Cluster-aware sandbox pool that distributes executions across nodes.
+    Cluster-aware sandbox pool with Redis node discovery.
 
-    Node registration is driven by heartbeats published to Redis.
-    Each registered node runs SandboxPool (Sprint 3) locally.
-
-    Usage
-    -----
-        pool = DistributedSandboxPool(redis_client=redis)
-        await pool.start()
-
-        result = await pool.execute(
-            run_id="run-acme-01",
-            language="python",
-            code='print("hello")',
-            timeout=10,
-        )
-
-        await pool.close()
-
-    Args:
-        redis_client:        Async Redis client (None = local-only mode).
-        registry_key:        Redis hash key for node registry.
-        heartbeat_interval:  How often this node publishes heartbeat (seconds).
-        stale_threshold:     Seconds without heartbeat → node UNHEALTHY.
-        local_node:          If provided, include this node in the pool directly.
+    Sprint 7 additions:
+    * HFAMetrics.inc_sandbox_slots() on slot reservation.
+    * HFAMetrics.dec_sandbox_slots() in finally block (never skipped).
     """
 
     REGISTRY_KEY = "sandbox:nodes"
 
     def __init__(
         self,
-        redis_client             = None,
-        heartbeat_interval: float= 15.0,
-        stale_threshold:    float= 30.0,
-        local_node: Optional[SandboxNode] = None,
+        redis_client            = None,
+        heartbeat_interval: float = 15.0,
+        stale_threshold:    float = 30.0,
+        local_node:         Optional[SandboxNode] = None,
     ) -> None:
-        self._redis             = redis_client
-        self._heartbeat_interval= heartbeat_interval
-        self._nodes: Dict[str, SandboxNode] = {}
-        self._selector          = NodeSelector()
-        self._monitor           = NodeHealthMonitor(stale_threshold=stale_threshold)
-        self._lock              = asyncio.Lock()
-        self._running           = False
-        self._heartbeat_task: Optional[asyncio.Task] = None
-        self._discovery_task:  Optional[asyncio.Task] = None
+        self._redis              = redis_client
+        self._heartbeat_interval = heartbeat_interval
+        self._nodes:             Dict[str, SandboxNode] = {}
+        self._selector           = NodeSelector()
+        self._monitor            = NodeHealthMonitor(stale_threshold=stale_threshold)
+        self._lock               = asyncio.Lock()
+        self._running            = False
+        self._discovery_task:    Optional[asyncio.Task] = None
 
         if local_node:
             self._nodes[local_node.node_id] = local_node
-        logger.info(
-            "DistributedSandboxPool created: local_node=%s redis=%s",
-            local_node.node_id if local_node else None,
-            "enabled" if redis_client else "disabled",
-        )
 
     async def start(self) -> None:
-        """Start health monitor + Redis discovery."""
         self._running = True
         self._monitor.start(self._nodes)
         if self._redis:
@@ -367,12 +249,6 @@ class DistributedSandboxPool:
     async def close(self) -> None:
         self._running = False
         await self._monitor.stop()
-        if self._heartbeat_task:
-            self._heartbeat_task.cancel()
-            try:
-                await self._heartbeat_task
-            except asyncio.CancelledError:
-                pass
         if self._discovery_task:
             self._discovery_task.cancel()
             try:
@@ -386,18 +262,11 @@ class DistributedSandboxPool:
     # ------------------------------------------------------------------
 
     async def register_node(self, node: SandboxNode) -> None:
-        """
-        Register a node directly (used for testing or local injection).
-        Also publishes to Redis if available.
-        """
         async with self._lock:
             self._nodes[node.node_id] = node
         if self._redis:
             await self._publish_node(node)
-        logger.info(
-            "SandboxNode registered: node=%s host=%s capacity=%d",
-            node.node_id, node.host, node.capacity,
-        )
+        logger.info("SandboxNode registered: %s host=%s", node.node_id, node.host)
 
     async def deregister_node(self, node_id: str) -> None:
         async with self._lock:
@@ -407,7 +276,6 @@ class DistributedSandboxPool:
                 await self._redis.hdel(self.REGISTRY_KEY, node_id)
             except Exception as exc:
                 logger.error("Redis deregister error: %s", exc)
-        logger.info("SandboxNode deregistered: node=%s", node_id)
 
     def list_nodes(self) -> List[SandboxNode]:
         return list(self._nodes.values())
@@ -430,50 +298,50 @@ class DistributedSandboxPool:
         """
         Execute code on the best available node.
 
-        Args:
-            run_id:   Run identifier (for logging/audit).
-            language: Runtime language ("python" or "node").
-            code:     Source code to execute.
-            timeout:  Execution timeout in seconds.
-            stdin:    Optional stdin data.
-
-        Returns:
-            SandboxResult.
-
-        Raises:
-            SandboxClusterError:   No healthy nodes available.
-            SandboxExecutionError: Node rejected or failed the execution.
+        Slot accounting:
+          node.active and HFAMetrics slot counter are BOTH in try/finally.
+          They cannot be skipped on failure (no slot leak).
         """
         async with self._lock:
             nodes = list(self._nodes.values())
 
         node = self._selector.select(nodes, language)
 
-        # Reserve a slot
+        # ── Reserve slot ────────────────────────────────────────────────
         async with self._lock:
             node.active += 1
+        HFAMetrics.inc_sandbox_slots(node.node_id)
 
-        start = time.time()
-        try:
-            result = await self._run_on_node(node, run_id, language, code, timeout, stdin)
-            logger.info(
-                "Sandbox execute: run=%s node=%s lang=%s exit=%d duration=%.0fms",
-                run_id, node.node_id, language,
-                result.exit_code, result.duration_ms,
-            )
-            return result
-        except Exception as exc:
-            logger.error(
-                "Sandbox execute FAILED: run=%s node=%s error=%s",
-                run_id, node.node_id, exc, exc_info=True,
-            )
-            # Mark node as degraded on execution failure
-            async with self._lock:
-                node.health = NodeHealth.DEGRADED
-            raise SandboxExecutionError(str(exc)) from exc
-        finally:
-            async with self._lock:
-                node.active = max(0, node.active - 1)
+        with _tracer.start_as_current_span("hfa.sandbox.execute") as span:
+            HFATracing.set_attrs(span, {
+                "hfa.run_id":  run_id,
+                "hfa.language": language,
+                "hfa.node_id": node.node_id,
+            })
+
+            try:
+                result = await self._run_on_node(node, run_id, language, code, timeout, stdin)
+                HFATracing.set_attrs(span, {"hfa.exit_code": result.exit_code})
+                HFATracing.span_ok(span)
+                logger.info(
+                    "Sandbox execute: run=%s node=%s exit=%d duration=%.0fms",
+                    run_id, node.node_id, result.exit_code, result.duration_ms,
+                )
+                return result
+
+            except Exception as exc:
+                async with self._lock:
+                    node.health = NodeHealth.DEGRADED
+                HFATracing.record_exc(span, exc)
+                logger.error("Sandbox execute FAILED: run=%s node=%s: %s",
+                             run_id, node.node_id, exc)
+                raise SandboxExecutionError(str(exc)) from exc
+
+            finally:
+                # ── Release slot — always runs (success AND failure) ───
+                async with self._lock:
+                    node.active = max(0, node.active - 1)
+                HFAMetrics.dec_sandbox_slots(node.node_id)
 
     # ------------------------------------------------------------------
     # Private
@@ -488,15 +356,9 @@ class DistributedSandboxPool:
         timeout:  int,
         stdin:    Optional[str],
     ) -> SandboxResult:
-        """
-        Delegate execution to the target node's Docker API.
-        In production, this makes an HTTP call to the node's Docker socket.
-        In tests, this is mocked at this boundary.
-        """
-        loop = asyncio.get_running_loop()
+        loop  = asyncio.get_running_loop()
         start = time.time()
         timed_out = False
-
         try:
             stdout, stderr, exit_code = await asyncio.wait_for(
                 loop.run_in_executor(
@@ -506,10 +368,7 @@ class DistributedSandboxPool:
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
-            timed_out = True
-            stdout, stderr, exit_code = "", "Execution timeout", 124
-
-        duration_ms = (time.time() - start) * 1000
+            timed_out, stdout, stderr, exit_code = True, "", "Execution timeout", 124
 
         return SandboxResult(
             run_id      = run_id,
@@ -518,40 +377,25 @@ class DistributedSandboxPool:
             stdout      = stdout,
             stderr      = stderr,
             exit_code   = exit_code,
-            duration_ms = duration_ms,
+            duration_ms = (time.time() - start) * 1000,
             timed_out   = timed_out,
         )
 
     @staticmethod
     def _docker_exec(
-        node:     SandboxNode,
-        language: str,
-        code:     str,
-        stdin:    Optional[str],
-    ) -> tuple[str, str, int]:
-        """
-        Synchronous Docker exec call (runs in executor).
-        Override in subclasses / integration tests.
-        """
+        node: SandboxNode, language: str, code: str, stdin: Optional[str]
+    ) -> tuple:
         import subprocess, tempfile, os
-        # This is the local fallback implementation.
-        # Production nodes override this via Docker remote API.
         interp = {"python": "python3", "node": "node"}.get(language, language)
         suffix = {"python": ".py", "node": ".js"}.get(language, ".txt")
-
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=suffix, delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=suffix, delete=False) as f:
             f.write(code)
             fpath = f.name
-
         try:
-            result = subprocess.run(
-                [interp, fpath],
-                capture_output=True, text=True,
-                input=stdin, timeout=30,
+            r = subprocess.run(
+                [interp, fpath], capture_output=True, text=True, input=stdin, timeout=30,
             )
-            return result.stdout, result.stderr, result.returncode
+            return r.stdout, r.stderr, r.returncode
         except subprocess.TimeoutExpired:
             return "", "Execution timeout", 124
         except FileNotFoundError:
@@ -563,7 +407,6 @@ class DistributedSandboxPool:
                 pass
 
     async def _discovery_loop(self) -> None:
-        """Periodically scan Redis for registered nodes."""
         while self._running:
             try:
                 await asyncio.sleep(self._heartbeat_interval)
@@ -573,20 +416,14 @@ class DistributedSandboxPool:
                         for node_id, data in raw.items():
                             nid = node_id.decode() if isinstance(node_id, bytes) else node_id
                             try:
-                                d = json.loads(
-                                    data.decode() if isinstance(data, bytes) else data
-                                )
+                                d = json.loads(data.decode() if isinstance(data, bytes) else data)
                                 if nid in self._nodes:
                                     self._nodes[nid].last_seen = d.get("last_seen", time.time())
                                 else:
                                     self._nodes[nid] = SandboxNode.from_dict(d)
-                                    logger.info(
-                                        "Discovered new node: %s", nid
-                                    )
+                                    logger.info("Discovered node: %s", nid)
                             except Exception as exc:
-                                logger.error(
-                                    "Node discovery parse error: node=%s error=%s", nid, exc
-                                )
+                                logger.error("Node parse error %s: %s", nid, exc)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -594,8 +431,7 @@ class DistributedSandboxPool:
 
     async def _publish_node(self, node: SandboxNode) -> None:
         try:
-            data = json.dumps(node.to_dict())
-            await self._redis.hset(self.REGISTRY_KEY, node.node_id, data)
+            await self._redis.hset(self.REGISTRY_KEY, node.node_id, json.dumps(node.to_dict()))
             await self._redis.expire(self.REGISTRY_KEY, 300)
         except Exception as exc:
             logger.error("Redis node publish error: %s", exc)

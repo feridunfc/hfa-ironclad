@@ -1,6 +1,6 @@
-"""
+﻿"""
 hfa-tools/src/hfa_tools/api/inspector.py
-IRONCLAD Sprint 7 — Run Inspector API (Sprint 6 → Sprint 7 upgrade)
+IRONCLAD Sprint 7 â€” Run Inspector API (Sprint 6 â†’ Sprint 7 upgrade)
 
 Sprint 6 baseline changes
 --------------------------
@@ -10,25 +10,25 @@ Sprint 6 summary had no created_at, so tenant lists sorted by run_id (wrong).
 
 Sprint 7 additions
 ------------------
-RunRegistry (Faz 1 — Persistence)
-  ✅ Hybrid storage: live runs in _graphs (RAM), archived in Redis (JSON)
-  ✅ get_live_graph(run_id)       → RAM only; None if archived
-  ✅ get_snapshot(run_id)         → RAM first, Redis fallback; None if absent
-  ✅ get_tenant_run_summaries()   → active (RAM) + historical (Redis) merged
-  ✅ _normalize_summary()         → uniform shape regardless of source
-  ✅ created_at in every summary  → correct time-based sort, not run_id lex
-  ✅ _archive_run() uses redis.pipeline(transaction=True)  — atomic SET+ZADD
-  ✅ history_ttl_seconds param    → every archived key gets a TTL
-  ✅ archive failure → run stays in RAM, never silently evicted
-  ✅ Redis down → graceful degrade to RAM-only, no crash
+RunRegistry (Faz 1 â€” Persistence)
+  âœ… Hybrid storage: live runs in _graphs (RAM), archived in Redis (JSON)
+  âœ… get_live_graph(run_id)       â†’ RAM only; None if archived
+  âœ… get_snapshot(run_id)         â†’ RAM first, Redis fallback; None if absent
+  âœ… get_tenant_run_summaries()   â†’ active (RAM) + historical (Redis) merged
+  âœ… _normalize_summary()         â†’ uniform shape regardless of source
+  âœ… created_at in every summary  â†’ correct time-based sort, not run_id lex
+  âœ… _archive_run() uses redis.pipeline(transaction=True)  â€” atomic SET+ZADD
+  âœ… history_ttl_seconds param    â†’ every archived key gets a TTL
+  âœ… archive failure â†’ run stays in RAM, never silently evicted
+  âœ… Redis down â†’ graceful degrade to RAM-only, no crash
 
-SSE (Faz 3 — Resilience)
-  ✅ Heartbeat ": heartbeat" every 15 s → proxy timeout guard
-  ✅ is_disconnected() per loop  → no zombie generator on client drop
-  ✅ CancelledError re-raised    → clean server shutdown
-  ✅ Archived run → single "event: complete" then close immediately
-  ✅ Tenant mismatch → 403 before generator opens (fail-fast)
-  ✅ X-Accel-Buffering: no header
+SSE (Faz 3 â€” Resilience)
+  âœ… Heartbeat ": heartbeat" every 15 s â†’ proxy timeout guard
+  âœ… is_disconnected() per loop  â†’ no zombie generator on client drop
+  âœ… CancelledError re-raised    â†’ clean server shutdown
+  âœ… Archived run â†’ single "event: complete" then close immediately
+  âœ… Tenant mismatch â†’ 403 before generator opens (fail-fast)
+  âœ… X-Accel-Buffering: no header
 
 Redis key schema
 ----------------
@@ -37,28 +37,38 @@ Redis key schema
 
 Redis unavailable policy
 ------------------------
-  get_snapshot():               log error → return None → caller raises 404
-  get_tenant_run_summaries():   log error → return RAM-only list
-  _archive_run():               returns False → cleanup skips eviction
+  get_snapshot():               log error â†’ return None â†’ caller raises 404
+  get_tenant_run_summaries():   log error â†’ return RAM-only list
+  _archive_run():               returns False â†’ cleanup skips eviction
 
 Mini Paket 2 hardening (Persistence Hardening)
 -----------------------------------------------
-  ✅ _archive_run() returns bool (True=success, False=failure) — no raise
-  ✅ _cleanup_loop evicts ONLY when archive returns True
-  ✅ get_snapshot(): JSON decode error handled separately from Redis error
-  ✅ _normalize_summary(): created_at fallback = 0.0 when source is missing it
-  ✅ SUMMARY_REQUIRED_FIELDS constant documents the guaranteed shape
-  ✅ Expired/TTL-expired history → 404 (same as never-existed; no tombstone)
-  ✅ Duplicate archive attempt is harmless (ZADD overwrites score idempotently)
-  ✅ All config params documented; no magic numbers
+  âœ… _archive_run() returns bool (True=success, False=failure) â€” no raise
+  âœ… _cleanup_loop evicts ONLY when archive returns True
+  âœ… get_snapshot(): JSON decode error handled separately from Redis error
+  âœ… _normalize_summary(): created_at fallback = 0.0 when source is missing it
+  âœ… SUMMARY_REQUIRED_FIELDS constant documents the guaranteed shape
+  âœ… Expired/TTL-expired history â†’ 404 (same as never-existed; no tombstone)
+  âœ… Duplicate archive attempt is harmless (ZADD overwrites score idempotently)
+  âœ… All config params documented; no magic numbers
 
 IRONCLAD rules
 --------------
-  * No print() — logging only.
-  * No asyncio.get_event_loop() — get_running_loop() where needed.
+  * No print() â€” logging only.
+  * No asyncio.get_event_loop() â€” get_running_loop() where needed.
   * close() always safe to call multiple times.
-  * 404 / 403 / 400 / 503 — typed, never 500 from missing data.
-  * cost_cents: int — no float USD.
+  * 404 / 403 / 400 / 503 â€” typed, never 500 from missing data.
+  * cost_cents: int â€” no float USD.
+
+Sprint 8 Mini 3 (Tracing)
+--------------------------
+  âœ… hfa.inspector.snapshot_lookup span: get_run_graph, get_run_summary,
+     list_tenant_runs â€” with try/except so 404/403 paths are also traced
+  âœ… hfa.inspector.stream_open span: SSE endpoint stream-open decision
+     (short span, ends before generator opens â€” no infinite span)
+  âœ… 403/404 HTTPExceptions recorded on span via record_exc before re-raise
+  âœ… hfa.archived attribute: "true"/"false" in both lookup and stream spans
+  âœ… Tracing never blocks or breaks business logic (no-op safe)
 """
 from __future__ import annotations
 
@@ -73,8 +83,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from hfa.obs.run_graph import ExecutionGraph, NodeStatus
-
-logger = logging.getLogger(__name__)
+from hfa.obs.tracing import get_tracer, HFATracing   # Sprint 8 Mini 3
+from hfa.obs.tracing import HFATracing, get_tracer
+logger  = logging.getLogger(__name__)
+_tracer = get_tracer("hfa.inspector")
 
 router = APIRouter(prefix="/v1/inspector", tags=["inspector"])
 
@@ -94,7 +106,7 @@ class NodeResponse(BaseModel):
     finished_at: Optional[float]
     duration_ms: Optional[float]
     tokens_used: int
-    cost_cents:  int              # integer cents — no float USD
+    cost_cents:  int              # integer cents â€” no float USD
     error:       Optional[str]
     input_hash:  Optional[str]
     output_hash: Optional[str]
@@ -104,7 +116,7 @@ class NodeResponse(BaseModel):
 class GraphSummaryResponse(BaseModel):
     run_id:           str
     tenant_id:        str
-    created_at:       float       # ✅ Sprint 7: timestamp for correct sort order
+    created_at:       float       # âœ… Sprint 7: timestamp for correct sort order
     total_nodes:      int
     done:             int
     failed:           int
@@ -126,7 +138,7 @@ class GraphResponse(BaseModel):
 
 class RunListItem(BaseModel):
     run_id:       str
-    created_at:   float           # ✅ Sprint 7: for time-ordered tenant list
+    created_at:   float           # âœ… Sprint 7: for time-ordered tenant list
     is_complete:  bool
     has_failures: bool
     total_nodes:  int
@@ -137,8 +149,8 @@ class RunListItem(BaseModel):
 # Summary contract
 # ---------------------------------------------------------------------------
 
-# Every summary dict — regardless of source (live ExecutionGraph or Redis-archived
-# JSON blob) — must contain at least these fields after _normalize_summary().
+# Every summary dict â€” regardless of source (live ExecutionGraph or Redis-archived
+# JSON blob) â€” must contain at least these fields after _normalize_summary().
 SUMMARY_REQUIRED_FIELDS: frozenset = frozenset({
     "run_id", "tenant_id", "created_at",
     "total_nodes", "done", "failed", "running", "pending",
@@ -160,10 +172,10 @@ def _normalize_summary(
     through here so callers never need to handle missing fields.
 
     created_at:
-        If None, falls back to 0.0 (sorts to bottom of tenant list — safe,
+        If None, falls back to 0.0 (sorts to bottom of tenant list â€” safe,
         not silent). A warning is logged so ops can detect this case.
     run_id / tenant_id:
-        Always injected from caller — never trusted from ``raw``.
+        Always injected from caller â€” never trusted from ``raw``.
 
     The resulting dict is guaranteed to satisfy SUMMARY_REQUIRED_FIELDS.
     """
@@ -199,18 +211,18 @@ class RunRegistry:
 
     Public API (contracts tested in test_sprint7_inspector.py)
     -----------------------------------------------------------
-      register(graph)                     → add live graph (called from orchestrator)
-      get_live_graph(run_id)              → RAM only; None if archived or unknown
-      get_snapshot(run_id)               → RAM first, Redis fallback; None if absent
-      get_tenant_run_summaries(tenant)   → active + historical, newest first
-      list_by_tenant(tenant)             → sync RAM-only list (Sprint 6 compat)
+      register(graph)                     â†’ add live graph (called from orchestrator)
+      get_live_graph(run_id)              â†’ RAM only; None if archived or unknown
+      get_snapshot(run_id)               â†’ RAM first, Redis fallback; None if absent
+      get_tenant_run_summaries(tenant)   â†’ active + historical, newest first
+      list_by_tenant(tenant)             â†’ sync RAM-only list (Sprint 6 compat)
 
     Internal layout
     ---------------
-      _graphs:   Dict[run_id, ExecutionGraph]   — live runs
-      _added_at: Dict[run_id, float]            — registration timestamp
+      _graphs:   Dict[run_id, ExecutionGraph]   â€” live runs
+      _added_at: Dict[run_id, float]            â€” registration timestamp
       _redis:    Optional async Redis client
-      _history_ttl: int                         — TTL for archived Redis keys
+      _history_ttl: int                         â€” TTL for archived Redis keys
 
     Args
     ----
@@ -286,7 +298,7 @@ class RunRegistry:
     def get_live_graph(self, run_id: str) -> Optional[ExecutionGraph]:
         """
         Return in-memory ExecutionGraph for SSE streaming.
-        Never queries Redis — returns None for archived or unknown runs.
+        Never queries Redis â€” returns None for archived or unknown runs.
         """
         return self._graphs.get(run_id)
 
@@ -301,10 +313,10 @@ class RunRegistry:
         Returns a normalised snapshot dict, or None if absent everywhere.
 
         Error handling:
-          Redis network error  → log + return None (→ 404, not 500)
-          JSON decode error    → log + return None (corrupt entry treated as absent)
+          Redis network error  â†’ log + return None (â†’ 404, not 500)
+          JSON decode error    â†’ log + return None (corrupt entry treated as absent)
         """
-        # 1. RAM hit — always wins
+        # 1. RAM hit â€” always wins
         g = self._graphs.get(run_id)
         if g is not None:
             created_at      = self._added_at.get(run_id, time.time())
@@ -323,7 +335,7 @@ class RunRegistry:
                 logger.error(
                     "RunRegistry.get_snapshot redis error run=%s: %s", run_id, exc
                 )
-                return None   # Redis unavailable → treat as not-found
+                return None   # Redis unavailable â†’ treat as not-found
 
             if raw is not None:
                 try:
@@ -334,7 +346,7 @@ class RunRegistry:
                         "RunRegistry.get_snapshot JSON decode error run=%s: %s",
                         run_id, exc,
                     )
-                    return None   # Corrupt entry → treat as not-found
+                    return None   # Corrupt entry â†’ treat as not-found
 
         return None
 
@@ -350,9 +362,9 @@ class RunRegistry:
         Rules:
           * Sort by created_at descending (newest first).
           * Active (RAM) wins on duplicate run_id.
-          * Redis error → log + return RAM-only (graceful degrade).
+          * Redis error â†’ log + return RAM-only (graceful degrade).
         """
-        # Active (RAM) — authoritative source
+        # Active (RAM) â€” authoritative source
         active: Dict[str, Dict] = {}
         for g in self._graphs.values():
             if g.tenant_id == tenant_id:
@@ -361,7 +373,7 @@ class RunRegistry:
                     g.snapshot()["summary"], g.run_id, tenant_id, ca
                 )
 
-        # Historical (Redis) — only for runs not currently in RAM
+        # Historical (Redis) â€” only for runs not currently in RAM
         historical: Dict[str, Dict] = {}
         if self._redis is not None:
             try:
@@ -415,7 +427,7 @@ class RunRegistry:
         either both commit or neither does.
 
         Returns True on success, False on failure.
-        Does NOT raise — caller checks return value and decides whether to evict.
+        Does NOT raise â€” caller checks return value and decides whether to evict.
 
         Idempotency:
             Calling twice for the same run_id is safe:
@@ -569,7 +581,7 @@ def _graph_resp_from_snap(snap: Dict[str, Any]) -> GraphResponse:
 
 
 # ---------------------------------------------------------------------------
-# Endpoints  (Sprint 7: all REST endpoints now use async _require_snapshot)
+# Endpoints  (Sprint 7: async _require_snapshot; Sprint 8 Mini 3: tracing)
 # ---------------------------------------------------------------------------
 
 @router.get("/runs/{run_id}", response_model=GraphResponse)
@@ -578,11 +590,26 @@ async def get_run_graph(
     request:     Request,
     x_tenant_id: Optional[str] = Header(None),
 ) -> GraphResponse:
-    """Full graph snapshot — live or archived. 404/403/400 as appropriate."""
+    """Full graph snapshot â€” live or archived. 404/403/400 as appropriate."""
     tenant_id = _require_tenant(x_tenant_id)
     registry  = _get_registry(request)
-    snap      = await _require_snapshot(registry, run_id, tenant_id)
-    return _graph_resp_from_snap(snap)
+
+    with _tracer.start_as_current_span("hfa.inspector.snapshot_lookup") as span:
+        HFATracing.set_attrs(span, {
+            "hfa.run_id":    run_id,
+            "hfa.tenant_id": tenant_id,
+            "hfa.endpoint":  "get_run_graph",
+        })
+        try:
+            snap = await _require_snapshot(registry, run_id, tenant_id)
+            HFATracing.set_attrs(span, {
+                "hfa.archived": str(registry.get_live_graph(run_id) is None).lower(),
+            })
+            HFATracing.span_ok(span)
+            return _graph_resp_from_snap(snap)
+        except Exception as exc:
+            HFATracing.record_exc(span, exc)
+            raise
 
 
 @router.get("/runs/{run_id}/nodes", response_model=List[NodeResponse])
@@ -619,11 +646,23 @@ async def get_run_summary(
     request:     Request,
     x_tenant_id: Optional[str] = Header(None),
 ) -> GraphSummaryResponse:
-    """Lightweight summary — designed for fast polling (<5 ms)."""
+    """Lightweight summary â€” designed for fast polling (<5 ms)."""
     tenant_id = _require_tenant(x_tenant_id)
     registry  = _get_registry(request)
-    snap      = await _require_snapshot(registry, run_id, tenant_id)
-    return GraphSummaryResponse(**snap["summary"])
+
+    with _tracer.start_as_current_span("hfa.inspector.snapshot_lookup") as span:
+        HFATracing.set_attrs(span, {
+            "hfa.run_id":    run_id,
+            "hfa.tenant_id": tenant_id,
+            "hfa.endpoint":  "get_run_summary",
+        })
+        try:
+            snap = await _require_snapshot(registry, run_id, tenant_id)
+            HFATracing.span_ok(span)
+            return GraphSummaryResponse(**snap["summary"])
+        except Exception as exc:
+            HFATracing.record_exc(span, exc)
+            raise
 
 
 @router.get("/tenants/{tenant_id}/runs", response_model=List[RunListItem])
@@ -638,8 +677,20 @@ async def list_tenant_runs(
     if requesting != tenant_id:
         raise HTTPException(403, "Cannot access another tenant's runs")
 
-    registry  = _get_registry(request)
-    summaries = await registry.get_tenant_run_summaries(tenant_id, limit=limit)
+    registry = _get_registry(request)
+
+    with _tracer.start_as_current_span("hfa.inspector.snapshot_lookup") as span:
+        HFATracing.set_attrs(span, {
+            "hfa.tenant_id": tenant_id,
+            "hfa.endpoint":  "list_tenant_runs",
+        })
+        try:
+            summaries = await registry.get_tenant_run_summaries(tenant_id, limit=limit)
+            HFATracing.set_attrs(span, {"hfa.result_count": len(summaries)})
+            HFATracing.span_ok(span)
+        except Exception as exc:
+            HFATracing.record_exc(span, exc)
+            raise
 
     return [
         RunListItem(
@@ -653,46 +704,57 @@ async def list_tenant_runs(
         for s in summaries
     ]
 
-
 @router.get("/runs/{run_id}/events")
 async def stream_run_events(
-    run_id:      str,
-    request:     Request,
-    x_tenant_id: Optional[str] = Header(None),
-    interval_ms: int = Query(500, ge=100, le=5000),
+        run_id: str,
+        request: Request,
+        x_tenant_id: Optional[str] = Header(None),
+        interval_ms: int = Query(500, ge=100, le=5000),
 ) -> StreamingResponse:
-    """
-    SSE stream for live run graph updates.
-
-    Sprint 7 resilience:
-      * Heartbeat ": heartbeat" every 15 s — proxy timeout guard.
-      * is_disconnected() per loop — no zombie generator on client drop.
-      * CancelledError re-raised — clean server shutdown.
-      * Archived run → single "event: complete" then close.
-      * Tenant mismatch → 403 raised before generator opens.
-    """
-    tenant_id  = _require_tenant(x_tenant_id)
-    registry   = _get_registry(request)
+    tenant_id = _require_tenant(x_tenant_id)
+    registry = _get_registry(request)
     live_graph = registry.get_live_graph(run_id)
 
-    # Fail-fast tenant check before stream opens
-    if live_graph is not None and live_graph.tenant_id != tenant_id:
-        raise HTTPException(403, "Tenant mismatch")
+    archived_snapshot: Optional[Dict[str, Any]] = None
+
+    with _tracer.start_as_current_span("hfa.inspector.stream_open") as span:
+        HFATracing.set_attrs(
+            span,
+            {
+                "hfa.run_id": run_id,
+                "hfa.tenant_id": tenant_id,
+            },
+        )
+
+        try:
+            # Fail-fast tenant / archived lookup before StreamingResponse starts
+            if live_graph is not None:
+                HFATracing.set_attrs(span, {"hfa.archived": "false"})
+
+                if live_graph.tenant_id != tenant_id:
+                    raise HTTPException(403, "Tenant mismatch")
+            else:
+                archived_snapshot = await _require_snapshot(registry, run_id, tenant_id)
+                HFATracing.set_attrs(span, {"hfa.archived": "true"})
+
+            HFATracing.span_ok(span)
+
+        except Exception as exc:
+            HFATracing.record_exc(span, exc)
+            raise
 
     async def _generate() -> AsyncGenerator[str, None]:
         # Archived path: single snapshot event then close
-        if live_graph is None:
-            snap = await _require_snapshot(registry, run_id, tenant_id)
+        if archived_snapshot is not None:
             yield (
                 f"event: complete\n"
-                f"data: {json.dumps(snap['summary'], separators=(',', ':'))}\n\n"
+                f"data: {json.dumps(archived_snapshot['summary'], separators=(',', ':'))}\n\n"
             )
             return
 
-        # Live path: stream until complete or client disconnects
-        prev_json:         Optional[str] = None
-        heartbeat_interval               = 15.0   # seconds
-        last_yield_ts                    = time.time()
+        prev_json: Optional[str] = None
+        heartbeat_interval = 15.0
+        last_yield_ts = time.time()
 
         try:
             while True:
@@ -700,13 +762,13 @@ async def stream_run_events(
                     logger.info("SSE client disconnected: run=%s", run_id)
                     break
 
-                snap         = live_graph.snapshot()
-                summary      = snap["summary"]
+                snap = live_graph.snapshot()
+                summary = snap["summary"]
                 summary_json = json.dumps(summary, separators=(",", ":"))
-                now          = time.time()
+                now = time.time()
 
                 if summary_json != prev_json:
-                    prev_json     = summary_json
+                    prev_json = summary_json
                     yield f"data: {summary_json}\n\n"
                     last_yield_ts = now
                 elif now - last_yield_ts > heartbeat_interval:
@@ -724,15 +786,17 @@ async def stream_run_events(
 
         except asyncio.CancelledError:
             logger.info("SSE cancelled (server shutdown): run=%s", run_id)
-            raise   # propagate — do not swallow
+            raise
 
     return StreamingResponse(
         _generate(),
-        media_type = "text/event-stream",
-        headers    = {
-            "Cache-Control":               "no-cache",
-            "Connection":                  "keep-alive",
-            "X-Accel-Buffering":           "no",
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
             "Access-Control-Allow-Origin": "*",
         },
     )
+
+
