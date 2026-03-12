@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - "feature/**"
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  core-tests:
+    name: Core tests (Python 3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Upgrade packaging tools
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install pytest pytest-asyncio pytest-mock pytest-cov fakeredis anyio
+
+      - name: Show Python environment
+        run: |
+          python --version
+          python -m pip --version
+
+      - name: Run core suite
+        env:
+          PYTHONPATH: hfa-core/src:hfa-tools/src:hfa-worker/src:hfa-control/src
+        run: |
+          python -m pytest tests/core -q --import-mode=importlib
+
+  smoke-imports:
+    name: Import smoke check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Upgrade packaging tools
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+
+      - name: Smoke imports
+        env:
+          PYTHONPATH: hfa-core/src:hfa-tools/src:hfa-worker/src:hfa-control/src
+        run: |
+          python -c "import hfa.events.schema"
+          python -c "import hfa_worker"
+          python -c "import hfa_control"
+          python -c "import hfa_tools"
