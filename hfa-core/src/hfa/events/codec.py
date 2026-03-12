@@ -22,26 +22,28 @@ from typing import Any, Dict
 logger = logging.getLogger(__name__)
 
 
-def serialize_event(event: Any) -> Dict[str, str]:
-    """Convert a dataclass event to a flat dict[str, str] for XADD."""
+def serialize_event(event: Any, *, omit_none_trace: bool = False) -> Dict[str, str]:
     if not is_dataclass(event):
-        raise TypeError(f"serialize_event expects dataclass, got {type(event)!r}")
+        raise TypeError("serialize_event expects dataclass")
 
-    raw = asdict(event)
+    data = asdict(event)
     out: Dict[str, str] = {}
-    for k, v in raw.items():
+
+    for k, v in data.items():
+        if k.startswith("_"):
+            continue
+
+        if omit_none_trace and k in {"trace_parent", "trace_state"} and v is None:
+            continue
+
         if v is None:
-            if k in ("trace_parent", "trace_state"):
-                continue        # omit None trace fields entirely
             out[k] = ""
         elif isinstance(v, (dict, list)):
             out[k] = json.dumps(v, separators=(",", ":"))
-        elif isinstance(v, bool):
-            out[k] = "true" if v else "false"
         else:
             out[k] = str(v)
-    return out
 
+    return out
 
 def decode_field(field_name: str, raw: Any, type_hint: str) -> Any:
     """
