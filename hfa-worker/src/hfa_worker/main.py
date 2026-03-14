@@ -129,3 +129,30 @@ class WorkerService:
             except Exception as exc:
                 logger.error("Shard renew loop failed worker_id=%s error=%s", self._worker_id, exc, exc_info=True)
                 await asyncio.sleep(1)
+
+
+
+
+# Apply this integration to the existing hfa-worker/src/hfa_worker/main.py
+
+self._consumer = WorkerConsumer(
+    redis=redis,
+    worker_id=worker_id,
+    worker_group=worker_group,
+    shards=shards,
+    executor=executor,
+)
+
+self._heartbeat = WorkerHeartbeatPublisher(
+    redis=redis,
+    worker_id=worker_id,
+    worker_group=worker_group,
+    region=region,
+    shards=shards,
+    capacity=capacity,
+    inflight_fn=lambda: self._consumer.inflight_count,
+    is_draining_fn=lambda: self._consumer.is_draining,
+    version=version,
+    capabilities=capabilities,
+)
+

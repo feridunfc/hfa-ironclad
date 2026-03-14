@@ -1,25 +1,29 @@
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.backends.legacy:build"
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "hfa-core"
 version = "0.1.0"
+description = "IRONCLAD core package"
 requires-python = ">=3.11"
 dependencies = [
-    "pydantic>=2.7",
+    "redis>=5.0",
+    "pydantic>=2.0",
     "cryptography>=42",
-    "opentelemetry-api>=1.24",
 ]
 
 [project.optional-dependencies]
-nats  = ["nats-py>=2.6"]
-kafka = ["aiokafka>=0.10"]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "pytest-mock>=3.14",
+    "fakeredis[aioredis]>=2.23",
+    "anyio>=4.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths    = ["tests"]
-filterwarnings = ["ignore::DeprecationWarning", "ignore::pytest.PytestUnraisableExceptionWarning"]
