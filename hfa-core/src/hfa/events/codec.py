@@ -39,7 +39,8 @@ def serialize_event(event: Any, *, omit_none_trace: bool = False) -> Dict[str, s
         if v is None:
             out[k] = ""
         elif isinstance(v, (dict, list)):
-            out[k] = json.dumps(v, separators=(",", ":"))
+            out[k] = json.dumps(v, separators=
+            (",", ":"))
         else:
             out[k] = str(v)
 
