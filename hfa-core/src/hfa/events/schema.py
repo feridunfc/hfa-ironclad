@@ -18,9 +18,6 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from hfa.events.codec import decode_field
-from dataclasses import dataclass, field
-import time
-from typing import Any, Dict, Optional
 #from hfa.events.base import HFAEvent
 
 # ---------------------------------------------------------------------------

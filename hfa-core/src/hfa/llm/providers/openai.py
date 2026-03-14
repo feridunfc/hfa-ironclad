@@ -2,7 +2,6 @@
 hfa-core/src/hfa/llm/providers/openai.py
 IRONCLAD — OpenAI provider with native structured outputs (response_format)
 """
-import asyncio
 import json
 import logging
 from typing import Optional, Type, TypeVar

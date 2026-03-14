@@ -25,9 +25,8 @@ IRONCLAD rules
 from __future__ import annotations
 
 import logging
-import time
-from contextlib import contextmanager, nullcontext
-from typing import Any, Dict, Generator, Iterator, Optional
+from contextlib import contextmanager
+from typing import Any, Dict, Generator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -284,7 +283,6 @@ def extract_trace_context(headers: Dict[str, str]) -> Any:
     if not _OTEL_AVAILABLE:
         return None
     try:
-        from opentelemetry import context as otel_ctx
         propagator = CompositePropagator([
             TraceContextTextMapPropagator(),
             W3CBaggagePropagator(),

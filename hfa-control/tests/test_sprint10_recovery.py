@@ -4,7 +4,6 @@ IRONCLAD Sprint 10 — RecoveryService tests
 """
 from __future__ import annotations
 
-import asyncio
 import time
 import pytest
 import fakeredis.aioredis as faredis

@@ -10,7 +10,7 @@ import base64
 import json
 import tarfile
 import io
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 

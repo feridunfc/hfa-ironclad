@@ -34,10 +34,9 @@ import time
 from typing import List, Optional
 
 from hfa.events.schema import WorkerHeartbeatEvent, WorkerDrainingEvent
-from hfa.events.codec  import serialize_event
 
 try:
-    from hfa.obs.tracing  import get_tracer, HFATracing  # type: ignore[attr-defined]
+    from hfa.obs.tracing  import get_tracer  # type: ignore[attr-defined]
     _tracer = get_tracer("hfa.registry")
 except Exception:
     _tracer = None  # graceful no-op if OTel not configured
