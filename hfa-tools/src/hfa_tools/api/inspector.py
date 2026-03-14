@@ -84,7 +84,6 @@ from pydantic import BaseModel
 
 from hfa.obs.run_graph import ExecutionGraph, NodeStatus
 from hfa.obs.tracing import get_tracer, HFATracing   # Sprint 8 Mini 3
-from hfa.obs.tracing import HFATracing, get_tracer
 logger  = logging.getLogger(__name__)
 _tracer = get_tracer("hfa.inspector")
 

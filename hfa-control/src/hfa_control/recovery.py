@@ -46,7 +46,7 @@ from hfa_control.models     import ControlPlaneConfig
 from hfa_control.exceptions import DLQEntryNotFoundError, TenantMismatchError
 
 try:
-    from hfa.obs.tracing import get_tracer, HFATracing  # type: ignore
+    from hfa.obs.tracing import get_tracer  # type: ignore
     _tracer = get_tracer("hfa.recovery")
 except Exception:
     _tracer = None

@@ -24,20 +24,15 @@ Coverage
 """
 from __future__ import annotations
 
-import asyncio
-import json
 import pytest
-import pytest_asyncio
 import fakeredis.aioredis as faredis
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 from hfa.events.schema       import RunAdmittedEvent
-from hfa.events.codec        import serialize_event
 from hfa_control.scheduler   import Scheduler
 from hfa_control.models      import (
     WorkerProfile, WorkerStatus, ControlPlaneConfig,
 )
-from hfa_control.exceptions  import PlacementError
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────

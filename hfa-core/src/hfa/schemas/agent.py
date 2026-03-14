@@ -8,7 +8,7 @@ import logging
 import uuid
 
 from pydantic import BaseModel, Field, TypeAdapter
-from typing import Annotated, Optional, Union, Literal
+from typing import Literal
 logger = logging.getLogger(__name__)
 
 

@@ -25,7 +25,6 @@ import time
 from typing import Any, Optional
 
 from docker import DockerClient
-from docker.errors import APIError, NotFound
 
 logger = logging.getLogger(__name__)
 

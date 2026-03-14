@@ -20,7 +20,6 @@ import asyncio
 import json
 import time
 import uuid
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 TENANT = "acme_corp"

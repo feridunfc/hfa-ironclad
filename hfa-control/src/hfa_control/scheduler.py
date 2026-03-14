@@ -29,7 +29,6 @@ IRONCLAD rules
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import time
 from typing import List, Optional
@@ -42,7 +41,7 @@ from hfa_control.shard      import ShardOwnershipManager
 from hfa_control.exceptions import PlacementError
 
 try:
-    from hfa.obs.tracing import get_tracer, HFATracing  # type: ignore
+    from hfa.obs.tracing import get_tracer  # type: ignore
     _tracer = get_tracer("hfa.scheduler")
 except Exception:
     _tracer = None

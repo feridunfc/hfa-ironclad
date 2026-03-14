@@ -39,7 +39,8 @@ def serialize_event(event: Any, *, omit_none_trace: bool = False) -> Dict[str, s
         if v is None:
             out[k] = ""
         elif isinstance(v, (dict, list)):
-            out[k] = json.dumps(v, separators=(",", ":"))
+            out[k] = json.dumps(v, separators=
+            (",", ":"))
         else:
             out[k] = str(v)
 
@@ -102,3 +103,60 @@ def _default_for(type_hint: str) -> Any:
     if type_hint.startswith("Optional"):
         return None
     return ""
+
+
+
+# Append the following helpers to the existing hfa-core/src/hfa/events/codec.py
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def safe_decode_str(data: Dict[bytes, bytes], key: str, default: str = "") -> str:
+    val = data.get(key.encode(), b"")
+    if isinstance(val, bytes):
+        return val.decode("utf-8", errors="replace")
+    return str(val) if val is not None else default
+
+
+def safe_decode_int(data: Dict[bytes, bytes], key: str, default: int = 0) -> int:
+    val = data.get(key.encode(), b"0")
+    try:
+        return int(val.decode()) if isinstance(val, bytes) else int(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def safe_decode_float(data: Dict[bytes, bytes], key: str, default: float = 0.0) -> float:
+    val = data.get(key.encode(), b"0")
+    try:
+        return float(val.decode()) if isinstance(val, bytes) else float(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def safe_decode_json(data: Dict[bytes, bytes], key: str, default: Any = None) -> Any:
+    val = data.get(key.encode(), b"{}")
+    try:
+        if isinstance(val, bytes):
+            return json.loads(val.decode())
+        return json.loads(val) if isinstance(val, str) else (default or {})
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return default or {}
+
+
+def deserialize_run_requested(data: Dict[bytes, bytes]) -> Any:
+    from hfa.events.schema import RunRequestedEvent
+
+    return RunRequestedEvent(
+        run_id=safe_decode_str(data, 'run_id'),
+        tenant_id=safe_decode_str(data, 'tenant_id'),
+        agent_type=safe_decode_str(data, 'agent_type'),
+        priority=safe_decode_int(data, 'priority', 5),
+        payload=safe_decode_json(data, 'payload', {}),
+        idempotency_key=safe_decode_str(data, 'idempotency_key'),
+        trace_parent=safe_decode_str(data, 'trace_parent') or None,
+        trace_state=safe_decode_str(data, 'trace_state') or None,
+    )
+

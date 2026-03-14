@@ -4,7 +4,6 @@ IRONCLAD Sprint 10 — LeaderElection tests
 """
 from __future__ import annotations
 
-import asyncio
 import pytest
 import fakeredis.aioredis as faredis
 

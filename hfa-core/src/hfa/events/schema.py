@@ -17,9 +17,8 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
-
 from hfa.events.codec import decode_field
-
+#from hfa.events.base import HFAEvent
 
 # ---------------------------------------------------------------------------
 # Base
@@ -156,3 +155,37 @@ class GraphPatchedEvent(HFAEvent):
     seq:        int            = 0
     data:       Dict[str, Any] = field(default_factory=dict)
     # data["cost_cents"] must be int — no float USD
+
+
+# Append the following to hfa-core/src/hfa/events/schema.py
+
+
+
+
+@dataclass
+class RunCompletedEvent(HFAEvent):
+    event_type: str = 'RunCompleted'
+    run_id: str = ''
+    tenant_id: str = ''
+    worker_id: str = ''
+    cost_cents: int = 0
+    tokens_used: int = 0
+    payload: Dict[str, Any] = field(default_factory=dict)
+    completed_at: float = field(default_factory=time.time)
+    trace_parent: Optional[str] = None
+    trace_state: Optional[str] = None
+
+
+@dataclass
+class RunFailedEvent(HFAEvent):
+    event_type: str = 'RunFailed'
+    run_id: str = ''
+    tenant_id: str = ''
+    worker_id: str = ''
+    error: str = ''
+    cost_cents: int = 0
+    tokens_used: int = 0
+    payload: Dict[str, Any] = field(default_factory=dict)
+    completed_at: float = field(default_factory=time.time)
+    trace_parent: Optional[str] = None
+    trace_state: Optional[str] = None

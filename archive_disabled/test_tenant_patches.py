@@ -10,7 +10,6 @@ Covers:
 import uuid
 import pytest
 from unittest.mock import MagicMock, AsyncMock
-from datetime import datetime
 
 from hfa_tools.middleware.tenant import (
     TenantMiddleware,
