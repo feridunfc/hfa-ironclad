@@ -4,8 +4,6 @@ IRONCLAD Sprint 10 — WorkerRegistry tests
 """
 from __future__ import annotations
 
-import asyncio
-import json
 import time
 import pytest
 import fakeredis.aioredis as faredis
@@ -13,7 +11,7 @@ import fakeredis.aioredis as faredis
 from hfa.events.schema    import WorkerHeartbeatEvent, WorkerDrainingEvent
 from hfa.events.codec     import serialize_event
 from hfa_control.registry import WorkerRegistry
-from hfa_control.models   import WorkerStatus, ControlPlaneConfig
+from hfa_control.models   import ControlPlaneConfig
 from hfa_control.exceptions import WorkerNotFoundError
 
 

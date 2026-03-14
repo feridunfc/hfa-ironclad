@@ -130,7 +130,7 @@ class OTelMiddleware(BaseHTTPMiddleware):
                             config=self._config,
                         )
 
-                except Exception as exc:
+                except Exception:
                     success = False
                     if span:
                         span.set_attribute("http.status_code", 500)

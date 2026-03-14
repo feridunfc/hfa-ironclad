@@ -16,7 +16,6 @@ Usage
 """
 import argparse
 import logging
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path

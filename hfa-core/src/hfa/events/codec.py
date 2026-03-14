@@ -107,9 +107,7 @@ def _default_for(type_hint: str) -> Any:
 
 # Append the following helpers to the existing hfa-core/src/hfa/events/codec.py
 
-import json
 import logging
-from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 

@@ -4,7 +4,7 @@ IRONCLAD Sprint 10 — Control Plane API response models
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List
 from pydantic import BaseModel
 
 
