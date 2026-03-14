@@ -28,3 +28,9 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+exclude = [
+  "archive_disabled",
+  "tests/legacy",
+]
