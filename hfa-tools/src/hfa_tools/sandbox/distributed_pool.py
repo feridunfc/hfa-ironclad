@@ -385,7 +385,9 @@ class DistributedSandboxPool:
     def _docker_exec(
         node: SandboxNode, language: str, code: str, stdin: Optional[str]
     ) -> tuple:
-        import subprocess, tempfile, os
+        import subprocess
+        import tempfile
+        import os
         interp = {"python": "python3", "node": "node"}.get(language, language)
         suffix = {"python": ".py", "node": ".js"}.get(language, ".txt")
         with tempfile.NamedTemporaryFile(mode="w", suffix=suffix, delete=False) as f:

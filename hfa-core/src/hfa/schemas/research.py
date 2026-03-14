@@ -4,7 +4,6 @@ IRONCLAD Sprint 3 — Research schemas (split from agent.py for clarity).
 """
 from __future__ import annotations
 
-from typing import Optional
 from pydantic import BaseModel, Field
 
 

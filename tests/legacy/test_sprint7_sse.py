@@ -5,7 +5,6 @@ IRONCLAD Sprint 7 — SSE Resilience & Regression Tests
 
 from __future__ import annotations
 
-import asyncio
 import json
 import uuid
 from types import SimpleNamespace

@@ -28,9 +28,7 @@ IRONCLAD rules (validated by AST in test gate):
 from __future__ import annotations
 
 import asyncio
-import time
 import uuid
-import logging
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -103,9 +101,8 @@ class TestOrchestratorSuccessSpan:
 
     async def test_orchestrator_run_creates_span(self):
         from hfa_tools.services.orchestrator import (
-            RunOrchestrator, RunRequest, RunStatus,
+            RunOrchestrator, RunRequest,
         )
-        from opentelemetry.trace import StatusCode
 
         tracer, exporter = _make_test_tracer()
 
@@ -200,7 +197,7 @@ class TestOrchestratorFailureSpan:
 
     async def test_orchestrator_failure_records_exception(self):
         from hfa_tools.services.orchestrator import (
-            RunOrchestrator, RunRequest, RunStatus,
+            RunOrchestrator, RunRequest,
         )
         from opentelemetry.trace import StatusCode
 

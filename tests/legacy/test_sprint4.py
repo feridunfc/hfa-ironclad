@@ -15,9 +15,8 @@ Coverage:
 """
 from __future__ import annotations
 
-import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -75,7 +74,7 @@ class TestStateStoreABC:
             StateStore()  # type: ignore
 
     def test_partial_impl_cannot_instantiate(self):
-        from hfa.healing.store import StateStore, LoopState
+        from hfa.healing.store import StateStore
 
         class Partial(StateStore):
             async def get(self, key): return None
@@ -254,7 +253,7 @@ class TestSelfHealingEngine:
         )
 
     async def test_success_on_first_attempt(self, store):
-        from hfa.healing.loop import SelfHealingEngine, AttemptOutcome, HealingResult
+        from hfa.healing.loop import AttemptOutcome, HealingResult
 
         engine = self._make_engine(store)
 
@@ -373,7 +372,7 @@ class TestSelfHealingEngine:
         await engine.close()
 
     async def test_fingerprint_populated_on_retry(self, store):
-        from hfa.healing.loop import AttemptOutcome, AttemptContext
+        from hfa.healing.loop import AttemptOutcome
 
         engine = self._make_engine(store, max_attempts=3)
         ctxs = []

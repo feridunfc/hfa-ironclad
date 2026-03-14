@@ -25,7 +25,6 @@ from typing import AsyncIterator, Optional
 import docker
 from docker.errors import NotFound
 
-from hfa.core.config import settings
 
 logger = logging.getLogger(__name__)
 

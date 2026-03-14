@@ -1,4 +1,4 @@
-"""IRONCLAD Sprint 9 — worker lifecycle wiring."""
+"""IRONCLAD Sprint 9 â€” worker lifecycle wiring."""
 from __future__ import annotations
 
 import asyncio

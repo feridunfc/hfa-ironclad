@@ -30,10 +30,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
+
 from typing import Optional
 
-from hfa.obs.tracing  import get_tracer, HFATracing   # type: ignore[attr-defined]
+from hfa.obs.tracing  import get_tracer   # type: ignore[attr-defined]
 from hfa_control.exceptions import LeadershipError
 
 logger  = logging.getLogger(__name__)

@@ -17,10 +17,9 @@ Coverage:
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 import uuid
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -337,7 +336,6 @@ class TestDistributedSandboxPool:
         assert "n1" in pool._nodes
 
     async def test_deregister_node(self):
-        from hfa_tools.sandbox.distributed_pool import DistributedSandboxPool
         pool = self._make_pool([self._make_node()])
         await pool.deregister_node("n1")
         assert "n1" not in pool._nodes
@@ -348,7 +346,7 @@ class TestDistributedSandboxPool:
         assert len(pool.list_nodes()) == 1
 
     def test_healthy_node_count(self):
-        from hfa_tools.sandbox.distributed_pool import SandboxNode, NodeHealth
+        from hfa_tools.sandbox.distributed_pool import NodeHealth
         n1 = self._make_node("n1")
         n2 = self._make_node("n2")
         n2.health = NodeHealth.UNHEALTHY
@@ -634,7 +632,8 @@ class TestInspectorAPI:
 
 class TestProductionGateSprint6:
     def test_no_get_event_loop_in_sprint6_sources(self):
-        import ast, os
+        import ast
+        import os
         base = os.path.dirname(os.path.abspath(__file__))
         dirs = [
             os.path.join(base, "..", "..", "hfa-core", "src"),
