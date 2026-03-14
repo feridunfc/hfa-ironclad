@@ -1,0 +1,6 @@
+[tool.ruff]
+exclude = [
+    "archive_disabled",
+    "tests/legacy",
+    "hfa-tools",
+]
