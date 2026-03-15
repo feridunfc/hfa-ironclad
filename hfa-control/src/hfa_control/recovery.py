@@ -46,6 +46,11 @@ from hfa_control.models     import ControlPlaneConfig
 from hfa_control.exceptions import DLQEntryNotFoundError, TenantMismatchError
 
 try:
+    from hfa.obs.runtime_metrics import IRONCLADMetrics as _M
+except Exception:
+    _M = None  # type: ignore[assignment]
+
+try:
     from hfa.obs.tracing import get_tracer  # type: ignore
     _tracer = get_tracer("hfa.recovery")
 except Exception:
@@ -101,12 +106,19 @@ class RecoveryService:
         rescheduled = 0
         dlq_count   = 0
 
+        if stale_runs and _M:
+            _M.recovery_stale_detected_total.inc(len(stale_runs))
+
         for run_id in stale_runs:
             result = await self._handle_stale(run_id)
             if result == "rescheduled":
                 rescheduled += 1
+                if _M:
+                    _M.recovery_rescheduled_total.inc()
             elif result == "dlq":
                 dlq_count += 1
+                if _M:
+                    _M.recovery_dlq_total.inc()
 
         if stale_runs:
             logger.info(

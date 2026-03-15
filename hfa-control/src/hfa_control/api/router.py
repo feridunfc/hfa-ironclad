@@ -294,7 +294,7 @@ async def delete_dlq(
 
 
 # ------------------------------------------------------------------
-# Health
+# Health (existing endpoint preserved)
 # ------------------------------------------------------------------
 
 @router.get("/health", response_model=HealthResponse)
@@ -325,6 +325,101 @@ async def health(request: Request) -> HealthResponse:
         scheduler_lag=sched_lag,
         dlq_depth=dlq_depth,
     )
+
+
+# ------------------------------------------------------------------
+# Sprint 12 — operational endpoints
+# ------------------------------------------------------------------
+
+@router.get("/healthz")
+async def healthz() -> dict:
+    """Liveness probe — returns 200 if the process is alive."""
+    return {"status": "ok"}
+
+
+@router.get("/readyz")
+async def readyz(request: Request) -> dict:
+    """
+    Readiness probe — returns 200 when Redis is reachable and
+    at least one worker is registered.
+    Returns 503 when not ready.
+    """
+    from fastapi.responses import JSONResponse
+
+    redis = request.app.state.redis
+    cp    = request.app.state.cp
+
+    checks: dict = {}
+
+    # Redis ping
+    try:
+        await redis.ping()
+        checks["redis"] = "ok"
+    except Exception as exc:
+        checks["redis"] = f"error: {exc}"
+
+    # Worker registry
+    try:
+        reg_size = await cp.registry.registry_size()
+        checks["registry"] = f"size={reg_size}"
+    except Exception as exc:
+        checks["registry"] = f"error: {exc}"
+
+    ready = checks["redis"] == "ok"
+    if not ready:
+        return JSONResponse(status_code=503, content={"status": "not_ready", "checks": checks})
+    return {"status": "ready", "checks": checks}
+
+
+@router.get("/diagnostics/running")
+async def diagnostics_running(
+    request:     Request,
+    x_tenant_id: str = Header(...),
+    x_cp_auth:   str = Header(default=""),
+) -> dict:
+    """
+    Return runs currently tracked in the running ZSET with their state.
+    Operator-only.
+    """
+    _tenant_header(x_tenant_id)
+    _require_operator(x_cp_auth)
+
+    from hfa.runtime.state_store import StateStore
+    state_store = StateStore(request.app.state.redis)
+    runs = await state_store.get_running_runs(limit=200)
+    return {"running_count": len(runs), "runs": runs}
+
+
+@router.get("/diagnostics/recovery")
+async def diagnostics_recovery(
+    request:     Request,
+    x_tenant_id: str = Header(...),
+    x_cp_auth:   str = Header(default=""),
+) -> dict:
+    """Return DLQ depth and schedulable worker count for recovery visibility."""
+    _tenant_header(x_tenant_id)
+    _require_operator(x_cp_auth)
+
+    cp = request.app.state.cp
+    try:
+        dlq_depth = await cp.recovery.dlq_depth()
+    except Exception:
+        dlq_depth = -1
+
+    try:
+        schedulable = await cp.registry.list_schedulable_workers()
+        draining    = [
+            w for w in await cp.registry.list_healthy_workers() if w.is_draining
+        ]
+    except Exception:
+        schedulable = []
+        draining    = []
+
+    return {
+        "dlq_depth":          dlq_depth,
+        "schedulable_workers": len(schedulable),
+        "draining_workers":    len(draining),
+    }
 
 
 # ------------------------------------------------------------------

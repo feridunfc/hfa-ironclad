@@ -1,11 +1,26 @@
 """
 hfa-worker/src/hfa_worker/consumer.py
-IRONCLAD Sprint 11 --- Real Execution Path with Pending Resume & Failure Taxonomy (REVISED)
+IRONCLAD Sprint 11/12 — Real Execution Path with Observability
+
+Sprint 11 semantics preserved:
+  - CONSUMER_GROUP = "worker_consumers"  (unchanged)
+  - terminal failure  => failed + result + ACK
+  - infrastructure failure => no ACK, claim released
+  - success => done + result + ACK
+  - pending resume via XPENDING / XCLAIM
+
+Sprint 12 additions:
+  - IRONCLADMetrics instrumentation throughout
+  - close() uses asyncio.gather (no task leak)
+  - _claim_renewer logs and counts successes/failures
+  - _reclaim_pending_messages counts reclaimed messages
+  - _process_message records execution duration
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Optional, Set
 
 from hfa.events.codec import deserialize_run_requested, serialize_event
@@ -15,6 +30,11 @@ from hfa_worker.executor import BaseExecutor
 from hfa_worker.idempotency import IdempotencyGuard
 from hfa_worker.models import InfrastructureError, TerminalExecutionError
 from hfa_worker.redis_utils import ack_message, ensure_consumer_group
+
+try:
+    from hfa.obs.runtime_metrics import IRONCLADMetrics as _M
+except Exception:
+    _M = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 CONSUMER_GROUP = "worker_consumers"
@@ -85,16 +105,19 @@ class WorkerConsumer:
         )
 
     async def close(self) -> None:
+        """
+        Graceful shutdown — cancel both background tasks and await
+        them via gather so neither leaks.
+        """
         self._running = False
         self._pulling = False
 
-        for task in [self._task, self._renewer_task]:
-            if task:
-                task.cancel()
-                try:
-                    await asyncio.wait_for(task, timeout=1.0)
-                except (asyncio.CancelledError, asyncio.TimeoutError):
-                    pass
+        tasks = [t for t in (self._task, self._renewer_task) if t is not None]
+        for t in tasks:
+            t.cancel()
+
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         self._task = None
         self._renewer_task = None
@@ -103,18 +126,38 @@ class WorkerConsumer:
         while self._running:
             try:
                 await asyncio.sleep(300)
+                renewed = 0
                 for run_id in list(self._inflight):
-                    await self._guard.renew_claim(run_id)
+                    try:
+                        await self._guard.renew_claim(run_id)
+                        renewed += 1
+                    except Exception as exc:
+                        logger.warning(
+                            "Claim renew failed: worker=%s run=%s error=%s",
+                            self._worker_id, run_id, exc,
+                        )
+                        if _M:
+                            _M.claim_renew_failure_total.inc()
+                if renewed:
+                    if _M:
+                        _M.claim_renew_total.inc(renewed)
+                    logger.debug(
+                        "Claim renew: worker=%s renewed=%d",
+                        self._worker_id, renewed,
+                    )
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                logger.error("Claim renewer error: %s", exc)
+                logger.error("Claim renewer error: worker=%s %s", self._worker_id, exc)
+                if _M:
+                    _M.claim_renew_failure_total.inc()
 
     async def _main_lifecycle(self) -> None:
         await self._reclaim_pending_messages()
         await self._consume_loop()
 
     async def _reclaim_pending_messages(self) -> None:
+        total_reclaimed = 0
         for stream in self._streams:
             try:
                 pending = await self._redis.xpending_range(
@@ -152,18 +195,22 @@ class WorkerConsumer:
                 )
 
                 for msg_id, data in claimed:
-                    msg_id_str = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
+                    msg_id_str = (
+                        msg_id.decode() if isinstance(msg_id, bytes) else msg_id
+                    )
                     shard = int(stream.split(":")[-1])
                     logger.info(
                         "Reclaimed pending message: worker=%s stream=%s msg_id=%s",
-                        self._worker_id,
-                        stream,
-                        msg_id_str,
+                        self._worker_id, stream, msg_id_str,
                     )
+                    total_reclaimed += 1
                     await self._process_message(msg_id_str, data, stream, shard)
 
             except Exception as exc:
                 logger.error("Error reclaiming pending messages: %s", exc)
+
+        if total_reclaimed and _M:
+            _M.pending_reclaimed_total.inc(total_reclaimed)
 
     async def _consume_loop(self) -> None:
         streams_dict = {s: ">" for s in self._streams}
@@ -175,18 +222,24 @@ class WorkerConsumer:
                     consumername=self._consumer_name,
                     streams=streams_dict,
                     count=10,
-                    block=100,  # shorter block so shutdown/tests do not hang
+                    block=100,
                 )
 
                 if not msgs:
                     continue
 
                 for stream_name, entries in msgs:
-                    s_name = stream_name.decode() if isinstance(stream_name, bytes) else stream_name
+                    s_name = (
+                        stream_name.decode()
+                        if isinstance(stream_name, bytes)
+                        else stream_name
+                    )
                     shard = int(s_name.split(":")[-1])
 
                     for msg_id, data in entries:
-                        msg_id_str = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
+                        msg_id_str = (
+                            msg_id.decode() if isinstance(msg_id, bytes) else msg_id
+                        )
                         await self._process_message(msg_id_str, data, s_name, shard)
 
             except asyncio.CancelledError:
@@ -195,7 +248,9 @@ class WorkerConsumer:
                 logger.error("Consume loop error: %s", exc)
                 await asyncio.sleep(0.1)
 
-    async def _process_message(self, msg_id: str, data: dict, stream: str, shard: int) -> None:
+    async def _process_message(
+        self, msg_id: str, data: dict, stream: str, shard: int
+    ) -> None:
         try:
             event = deserialize_run_requested(data)
             if event is None:
@@ -219,9 +274,15 @@ class WorkerConsumer:
                 return
 
             self._inflight.add(event.run_id)
+            if _M:
+                _M.runs_started_total.inc()
+                _M.worker_inflight.inc()
+
+            exec_start = time.monotonic()
 
             try:
                 result = await self._executor.execute(event)
+                duration_ms = (time.monotonic() - exec_start) * 1000.0
 
                 if result.status == "done":
                     await self._state.store_result(
@@ -242,6 +303,9 @@ class WorkerConsumer:
                         cost_cents=result.cost_cents,
                         tokens_used=result.tokens_used,
                     )
+                    if _M:
+                        _M.runs_completed_total.inc()
+                        _M.run_execution_duration_ms.record(duration_ms)
                 else:
                     await self._state.store_result(
                         event.run_id,
@@ -263,14 +327,19 @@ class WorkerConsumer:
                         tokens_used=result.tokens_used,
                         payload=result.payload,
                     )
+                    if _M:
+                        _M.runs_failed_total.inc()
+                        _M.run_execution_duration_ms.record(duration_ms)
 
                 await self._redis.xadd("hfa:stream:results", serialize_event(evt))
                 await self._state.mark_completed(event.run_id)
                 await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
 
             except TerminalExecutionError as exc:
-                logger.warning("Terminal failure run=%s error=%s", event.run_id, exc)
-
+                duration_ms = (time.monotonic() - exec_start) * 1000.0
+                logger.warning(
+                    "Terminal failure run=%s error=%s", event.run_id, exc
+                )
                 await self._state.store_result(
                     event.run_id,
                     event.tenant_id,
@@ -294,18 +363,33 @@ class WorkerConsumer:
                 await self._state.mark_completed(event.run_id)
                 await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
 
+                if _M:
+                    _M.runs_failed_total.inc()
+                    _M.run_execution_duration_ms.record(duration_ms)
+
             except InfrastructureError as exc:
-                logger.warning("Infrastructure crash run=%s error=%s", event.run_id, exc)
+                logger.warning(
+                    "Infrastructure crash run=%s error=%s", event.run_id, exc
+                )
                 await self._state.release_claim(event.run_id)
-                # no ACK, no terminal state
+                if _M:
+                    _M.runs_infra_failed_total.inc()
+                # no ACK, no terminal state — retry path
 
             except Exception as exc:
-                logger.error("Unexpected infra crash run=%s error=%s", event.run_id, exc, exc_info=True)
+                logger.error(
+                    "Unexpected infra crash run=%s error=%s",
+                    event.run_id, exc, exc_info=True,
+                )
                 await self._state.release_claim(event.run_id)
-                # no ACK, no terminal state
+                if _M:
+                    _M.runs_infra_failed_total.inc()
+                # no ACK, no terminal state — retry path
 
             finally:
                 self._inflight.discard(event.run_id)
+                if _M:
+                    _M.worker_inflight.dec()
 
         except Exception as exc:
             logger.error("Message process error: %s", exc, exc_info=True)

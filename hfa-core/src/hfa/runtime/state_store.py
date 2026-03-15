@@ -152,3 +152,50 @@ class StateStore:
     async def mark_completed(self, run_id: str) -> None:
         await self._redis.zrem(self.RUNNING_ZSET, run_id)
         await self.release_claim(run_id)
+
+    # ------------------------------------------------------------------
+    # Sprint 12 — diagnostic / introspection helpers
+    # ------------------------------------------------------------------
+
+    async def get_running_runs(self, limit: int = 100) -> list[dict]:
+        """
+        Return up to `limit` runs currently in the running ZSET.
+        Each entry contains run_id, score (started_at), and current state.
+        """
+        try:
+            raw = await self._redis.zrange(
+                self.RUNNING_ZSET, 0, limit - 1, withscores=True
+            )
+        except Exception:
+            return []
+
+        result: list[dict] = []
+        for item in raw:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                run_id_raw, score = item
+            else:
+                continue
+            run_id = run_id_raw.decode() if isinstance(run_id_raw, bytes) else run_id_raw
+            state = await self.get_run_state(run_id)
+            result.append({
+                "run_id": run_id,
+                "started_at": float(score),
+                "state": state or "unknown",
+            })
+        return result
+
+    async def get_claim_owner(self, run_id: str) -> str | None:
+        """Return the worker_id that holds the execution claim, or None."""
+        key = self.EXECUTION_TOKEN_KEY.format(run_id)
+        val = await self._redis.get(key)
+        if val is None:
+            return None
+        return val.decode() if isinstance(val, bytes) else val
+
+    async def get_claim_ttl(self, run_id: str) -> int:
+        """Return TTL seconds remaining on the execution claim, or -2 if absent."""
+        key = self.EXECUTION_TOKEN_KEY.format(run_id)
+        try:
+            return await self._redis.ttl(key)
+        except Exception:
+            return -2
