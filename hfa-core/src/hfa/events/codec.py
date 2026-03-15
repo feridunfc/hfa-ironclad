@@ -1,9 +1,9 @@
 """
 hfa-core/src/hfa/events/codec.py
-IRONCLAD Sprint 10 — Event codec (serialise / deserialise)
+IRONCLAD Sprint 10/11 — Event codec (serialise / deserialise)
 
 Redis Streams store values as byte-strings.
-serialize_event()  -> dict[str,str]   ready for XADD
+serialize_event()  -> dict[str, str]  ready for XADD
 decode_field()     -> typed Python     called by HFAEvent.from_redis()
 
 IRONCLAD rules
@@ -39,12 +39,12 @@ def serialize_event(event: Any, *, omit_none_trace: bool = False) -> Dict[str, s
         if v is None:
             out[k] = ""
         elif isinstance(v, (dict, list)):
-            out[k] = json.dumps(v, separators=
-            (",", ":"))
+            out[k] = json.dumps(v, separators=(",", ":"))
         else:
             out[k] = str(v)
 
     return out
+
 
 def decode_field(field_name: str, raw: Any, type_hint: str) -> Any:
     """
@@ -56,37 +56,44 @@ def decode_field(field_name: str, raw: Any, type_hint: str) -> Any:
     if raw == "" or raw is None:
         return _default_for(type_hint)
 
-    # Collections stored as JSON
-    _json_hints = ("Dict[str, Any]", "List[int]", "List[str]",
-                   "dict", "list")
-    if type_hint in _json_hints or type_hint.startswith(("Dict", "List")):
+    json_hints = ("Dict[str, Any]", "List[int]", "List[str]", "dict", "list")
+    if type_hint in json_hints or type_hint.startswith(("Dict", "List")):
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
-            logger.warning("codec.decode_field: JSON error field=%s raw=%r",
-                           field_name, raw[:80])
+            logger.warning(
+                "codec.decode_field: JSON error field=%s raw=%r",
+                field_name,
+                raw[:80],
+            )
             return _default_for(type_hint)
 
     if type_hint == "int":
         try:
             return int(raw)
         except (ValueError, TypeError):
-            logger.warning("codec.decode_field: int cast failed field=%s raw=%r",
-                           field_name, raw)
+            logger.warning(
+                "codec.decode_field: int cast failed field=%s raw=%r",
+                field_name,
+                raw,
+            )
             return 0
 
     if type_hint == "float":
         try:
             return float(raw)
         except (ValueError, TypeError):
-            logger.warning("codec.decode_field: float cast failed field=%s raw=%r",
-                           field_name, raw)
+            logger.warning(
+                "codec.decode_field: float cast failed field=%s raw=%r",
+                field_name,
+                raw,
+            )
             return 0.0
 
     if type_hint == "bool":
         return raw.lower() in ("true", "1", "yes")
 
-    return raw     # str / Optional[str]
+    return raw
 
 
 def _default_for(type_hint: str) -> Any:
@@ -103,14 +110,6 @@ def _default_for(type_hint: str) -> Any:
     if type_hint.startswith("Optional"):
         return None
     return ""
-
-
-
-# Append the following helpers to the existing hfa-core/src/hfa/events/codec.py
-
-import logging
-
-logger = logging.getLogger(__name__)
 
 
 def safe_decode_str(data: Dict[bytes, bytes], key: str, default: str = "") -> str:
@@ -141,22 +140,23 @@ def safe_decode_json(data: Dict[bytes, bytes], key: str, default: Any = None) ->
     try:
         if isinstance(val, bytes):
             return json.loads(val.decode())
-        return json.loads(val) if isinstance(val, str) else (default or {})
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return default or {}
+        if isinstance(val, str):
+            return json.loads(val)
+        return default if default is not None else {}
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+        return default if default is not None else {}
 
 
 def deserialize_run_requested(data: Dict[bytes, bytes]) -> Any:
     from hfa.events.schema import RunRequestedEvent
 
     return RunRequestedEvent(
-        run_id=safe_decode_str(data, 'run_id'),
-        tenant_id=safe_decode_str(data, 'tenant_id'),
-        agent_type=safe_decode_str(data, 'agent_type'),
-        priority=safe_decode_int(data, 'priority', 5),
-        payload=safe_decode_json(data, 'payload', {}),
-        idempotency_key=safe_decode_str(data, 'idempotency_key'),
-        trace_parent=safe_decode_str(data, 'trace_parent') or None,
-        trace_state=safe_decode_str(data, 'trace_state') or None,
+        run_id=safe_decode_str(data, "run_id"),
+        tenant_id=safe_decode_str(data, "tenant_id"),
+        agent_type=safe_decode_str(data, "agent_type"),
+        priority=safe_decode_int(data, "priority", 5),
+        payload=safe_decode_json(data, "payload", {}),
+        idempotency_key=safe_decode_str(data, "idempotency_key"),
+        trace_parent=safe_decode_str(data, "trace_parent") or None,
+        trace_state=safe_decode_str(data, "trace_state") or None,
     )
-

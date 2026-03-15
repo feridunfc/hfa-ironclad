@@ -238,7 +238,6 @@ class SelfHealingEngine:
             raise HealingCircuitOpenError(run_id, state.circuit_open_until)
 
         # ── Retry loop ───────────────────────────────────────────────────
-        start_attempt = state.attempt
 
         while state.attempt < self._max_attempts:
             ctx = AttemptContext(
