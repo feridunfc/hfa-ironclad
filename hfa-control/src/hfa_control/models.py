@@ -50,6 +50,10 @@ class WorkerProfile:
     def available_slots(self) -> int:
         return max(0, self.capacity - self.inflight)
 
+    @property
+    def is_draining(self) -> bool:
+        return self.status == WorkerStatus.DRAINING
+
     @classmethod
     def from_redis_hash(cls, raw: dict) -> "WorkerProfile":
         def _s(k: bytes | str) -> str:
