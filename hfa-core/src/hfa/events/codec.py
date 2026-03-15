@@ -113,35 +113,53 @@ def _default_for(type_hint: str) -> Any:
 
 
 def safe_decode_str(data: Dict[bytes, bytes], key: str, default: str = "") -> str:
-    val = data.get(key.encode(), b"")
-    if isinstance(val, bytes):
-        return val.decode("utf-8", errors="replace")
-    return str(val) if val is not None else default
+    raw = data.get(key.encode())
+    if raw is None:
+        raw = data.get(key)  # type: ignore[arg-type]
+    if raw is None:
+        return default
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", errors="replace")
+    return str(raw) if raw is not None else default
 
 
 def safe_decode_int(data: Dict[bytes, bytes], key: str, default: int = 0) -> int:
-    val = data.get(key.encode(), b"0")
+    raw = data.get(key.encode())
+    if raw is None:
+        # Also check string key in case caller passes a str-keyed dict
+        raw = data.get(key)  # type: ignore[arg-type]
+    if raw is None:
+        return default
     try:
-        return int(val.decode()) if isinstance(val, bytes) else int(val)
+        return int(raw.decode()) if isinstance(raw, bytes) else int(raw)
     except (ValueError, TypeError):
         return default
 
 
 def safe_decode_float(data: Dict[bytes, bytes], key: str, default: float = 0.0) -> float:
-    val = data.get(key.encode(), b"0")
+    raw = data.get(key.encode())
+    if raw is None:
+        raw = data.get(key)  # type: ignore[arg-type]
+    if raw is None:
+        return default
     try:
-        return float(val.decode()) if isinstance(val, bytes) else float(val)
+        return float(raw.decode()) if isinstance(raw, bytes) else float(raw)
     except (ValueError, TypeError):
         return default
 
 
 def safe_decode_json(data: Dict[bytes, bytes], key: str, default: Any = None) -> Any:
-    val = data.get(key.encode(), b"{}")
+    _sentinel = object()
+    raw = data.get(key.encode(), _sentinel)
+    if raw is _sentinel:
+        raw = data.get(key, _sentinel)  # type: ignore[arg-type]
+    if raw is _sentinel:
+        return default if default is not None else {}
     try:
-        if isinstance(val, bytes):
-            return json.loads(val.decode())
-        if isinstance(val, str):
-            return json.loads(val)
+        if isinstance(raw, bytes):
+            return json.loads(raw.decode())
+        if isinstance(raw, str):
+            return json.loads(raw)
         return default if default is not None else {}
     except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
         return default if default is not None else {}
@@ -157,6 +175,45 @@ def deserialize_run_requested(data: Dict[bytes, bytes]) -> Any:
         priority=safe_decode_int(data, "priority", 5),
         payload=safe_decode_json(data, "payload", {}),
         idempotency_key=safe_decode_str(data, "idempotency_key"),
+        trace_parent=safe_decode_str(data, "trace_parent") or None,
+        trace_state=safe_decode_str(data, "trace_state") or None,
+    )
+
+
+def deserialize_run_completed(data: Dict[bytes, bytes]) -> Any:
+    """
+    Deserialise a RunCompletedEvent from a Redis Streams payload.
+    Missing / unknown fields are tolerated — returns safe defaults.
+    """
+    from hfa.events.schema import RunCompletedEvent
+
+    return RunCompletedEvent(
+        run_id=safe_decode_str(data, "run_id"),
+        tenant_id=safe_decode_str(data, "tenant_id"),
+        worker_id=safe_decode_str(data, "worker_id"),
+        cost_cents=safe_decode_int(data, "cost_cents", 0),
+        tokens_used=safe_decode_int(data, "tokens_used", 0),
+        payload=safe_decode_json(data, "payload", {}),
+        trace_parent=safe_decode_str(data, "trace_parent") or None,
+        trace_state=safe_decode_str(data, "trace_state") or None,
+    )
+
+
+def deserialize_run_failed(data: Dict[bytes, bytes]) -> Any:
+    """
+    Deserialise a RunFailedEvent from a Redis Streams payload.
+    Missing / unknown fields are tolerated — returns safe defaults.
+    """
+    from hfa.events.schema import RunFailedEvent
+
+    return RunFailedEvent(
+        run_id=safe_decode_str(data, "run_id"),
+        tenant_id=safe_decode_str(data, "tenant_id"),
+        worker_id=safe_decode_str(data, "worker_id"),
+        error=safe_decode_str(data, "error"),
+        cost_cents=safe_decode_int(data, "cost_cents", 0),
+        tokens_used=safe_decode_int(data, "tokens_used", 0),
+        payload=safe_decode_json(data, "payload", {}),
         trace_parent=safe_decode_str(data, "trace_parent") or None,
         trace_state=safe_decode_str(data, "trace_state") or None,
     )

@@ -164,3 +164,22 @@ class GraphPatchedEvent(HFAEvent):
     node_id: str = ""
     seq: int = 0
     data: Dict[str, Any] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Sprint 12 — additive only (no existing fields changed)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RunStartedEvent(HFAEvent):
+    """
+    Emitted when a worker successfully claims a run and begins execution.
+    Additive — optional for consumers that do not need it.
+    """
+    event_type: str = "RunStarted"
+    run_id: str = ""
+    tenant_id: str = ""
+    worker_id: str = ""
+    worker_group: str = ""
+    shard: int = 0
+    started_at: float = field(default_factory=time.time)
