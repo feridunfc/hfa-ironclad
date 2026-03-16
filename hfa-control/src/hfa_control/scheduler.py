@@ -33,7 +33,7 @@ import asyncio
 import logging
 import time
 from typing import List, Optional
-
+from hfa_control.fairness import FairnessSelector
 from hfa.events.schema import RunAdmittedEvent, RunScheduledEvent, RunRequestedEvent
 from hfa.events.codec import serialize_event
 from hfa_control.models import WorkerProfile, ControlPlaneConfig
@@ -57,7 +57,6 @@ logger = logging.getLogger(__name__)
 
 _GROUP = "hfa-cp-scheduler"
 
-
 class Scheduler:
     def __init__(
         self,
@@ -72,6 +71,9 @@ class Scheduler:
         self._config = config
         self._task: Optional[asyncio.Task] = None
         self._rr_counter = 0  # round-robin state
+
+        # Sprint 14A: fairness-ready, but not actively used yet
+        self._fairness = FairnessSelector()
 
     # ------------------------------------------------------------------
     # Lifecycle
