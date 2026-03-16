@@ -2,6 +2,7 @@
 tests/conftest.py
 IRONCLAD — shared pytest configuration
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -45,6 +46,7 @@ try:
         validate_run_id_format,
     )
 except ImportError:
+
     class BudgetGuard:
         def __init__(self, redis_client=None, default_budget_cents=10000, recovery_interval=1):
             self.redis = redis_client
@@ -111,6 +113,7 @@ except ImportError:
 # Skip legacy suite by default
 # ============================================================================
 
+
 def pytest_collection_modifyitems(config, items):
     for item in items:
         if "tests/legacy/" in str(item.fspath).replace("\\", "/"):
@@ -120,9 +123,11 @@ def pytest_collection_modifyitems(config, items):
                 )
             )
 
+
 # ============================================================================
 # Fixtures
 # ============================================================================
+
 
 @pytest.fixture
 def tenant_id() -> str:

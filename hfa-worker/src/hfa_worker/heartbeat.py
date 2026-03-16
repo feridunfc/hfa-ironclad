@@ -2,6 +2,7 @@
 hfa-worker/src/hfa_worker/heartbeat.py
 IRONCLAD Sprint 11 --- Worker Heartbeat Publisher with Drain Status
 """
+
 from __future__ import annotations
 
 import asyncio

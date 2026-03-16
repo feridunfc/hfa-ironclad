@@ -2,6 +2,7 @@
 hfa-core/src/hfa/llm/providers/openai.py
 IRONCLAD — OpenAI provider with native structured outputs (response_format)
 """
+
 import json
 import logging
 from typing import Optional, Type, TypeVar
@@ -9,7 +10,9 @@ from typing import Optional, Type, TypeVar
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ValidationError
 
-from hfa.core.config import settings  # NOTE: keep as-is if your config module is here; update if needed
+from hfa.core.config import (
+    settings,
+)  # NOTE: keep as-is if your config module is here; update if needed
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +37,9 @@ class OpenAIProvider:
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
 
-        self.client = AsyncOpenAI(api_key=self.api_key, timeout=timeout_seconds, max_retries=max_retries)
+        self.client = AsyncOpenAI(
+            api_key=self.api_key, timeout=timeout_seconds, max_retries=max_retries
+        )
         logger.info(f"OpenAIProvider initialized with model={model}")
 
     async def generate_structured(
@@ -91,7 +96,6 @@ class OpenAIProvider:
             )
         return validated
 
-    
     async def generate_text(
         self,
         prompt: str,
@@ -137,6 +141,7 @@ class OpenAIProvider:
 
         return content
 
+
 async def close(self):
-        await self.client.close()
-        logger.info("OpenAI client closed")
+    await self.client.close()
+    logger.info("OpenAI client closed")

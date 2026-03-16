@@ -21,6 +21,7 @@ Conditions supported
   field     str  — used together with "value": finding[field] == value
                    (both "field" and "value" must be present together)
 """
+
 from __future__ import annotations
 
 import logging
@@ -34,16 +35,17 @@ logger = logging.getLogger(__name__)
 # Policy action with priority ordering
 # ---------------------------------------------------------------------------
 
+
 class PolicyAction(str, Enum):
     ALLOW = "allow"
-    HITL  = "hitl"
-    DENY  = "deny"
+    HITL = "hitl"
+    DENY = "deny"
 
 
 # Priority: DENY=3 (most restrictive), HITL=2, ALLOW=1 (least)
 _ACTION_PRIORITY: Dict[PolicyAction, int] = {
-    PolicyAction.DENY:  3,
-    PolicyAction.HITL:  2,
+    PolicyAction.DENY: 3,
+    PolicyAction.HITL: 2,
     PolicyAction.ALLOW: 1,
 }
 
@@ -54,6 +56,7 @@ _CONDITION_KEYS = frozenset({"pattern", "severity", "field"})
 # ---------------------------------------------------------------------------
 # Evaluation result
 # ---------------------------------------------------------------------------
+
 
 class EvaluationResult:
     """
@@ -72,16 +75,16 @@ class EvaluationResult:
     def __init__(
         self,
         decision: PolicyAction,
-        details:  List[Dict[str, Any]],
-        denials:  List[Dict[str, Any]],
-        hitls:    List[Dict[str, Any]],
-        summary:  str,
+        details: List[Dict[str, Any]],
+        denials: List[Dict[str, Any]],
+        hitls: List[Dict[str, Any]],
+        summary: str,
     ) -> None:
         self.decision = decision
-        self.details  = details
-        self.denials  = denials
-        self.hitls    = hitls
-        self.summary  = summary
+        self.details = details
+        self.denials = denials
+        self.hitls = hitls
+        self.summary = summary
 
     def __repr__(self) -> str:
         return (
@@ -93,6 +96,7 @@ class EvaluationResult:
 # ---------------------------------------------------------------------------
 # CompliancePolicy
 # ---------------------------------------------------------------------------
+
 
 class CompliancePolicy:
     """
@@ -154,9 +158,7 @@ class CompliancePolicy:
 
             # 2. "action" key is mandatory
             if "action" not in rule:
-                raise ValueError(
-                    f"Rule[{i}] missing required key 'action': {rule!r}"
-                )
+                raise ValueError(f"Rule[{i}] missing required key 'action': {rule!r}")
 
             # 3. action value must be valid
             if rule["action"] not in valid_actions:
@@ -221,17 +223,17 @@ class CompliancePolicy:
         """
         if not findings:
             return EvaluationResult(
-                decision = PolicyAction.ALLOW,
-                details  = [],
-                denials  = [],
-                hitls    = [],
-                summary  = "ALLOWED (no findings)",
+                decision=PolicyAction.ALLOW,
+                details=[],
+                denials=[],
+                hitls=[],
+                summary="ALLOWED (no findings)",
             )
 
         details: List[Dict[str, Any]] = []
         denials: List[Dict[str, Any]] = []
-        hitls:   List[Dict[str, Any]] = []
-        actions: List[PolicyAction]   = []
+        hitls: List[Dict[str, Any]] = []
+        actions: List[PolicyAction] = []
 
         for f in findings:
             action = self.evaluate(f)
@@ -255,15 +257,18 @@ class CompliancePolicy:
         logger.info(
             "CompliancePolicy.evaluate_all: decision=%s findings=%d "
             "denials=%d hitls=%d",
-            decision.value, len(findings), len(denials), len(hitls),
+            decision.value,
+            len(findings),
+            len(denials),
+            len(hitls),
         )
 
         return EvaluationResult(
-            decision = decision,
-            details  = details,
-            denials  = denials,
-            hitls    = hitls,
-            summary  = summary,
+            decision=decision,
+            details=details,
+            denials=denials,
+            hitls=hitls,
+            summary=summary,
         )
 
     # ------------------------------------------------------------------

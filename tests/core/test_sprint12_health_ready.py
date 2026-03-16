@@ -9,6 +9,7 @@ Verifies:
   - DrainManager.start_drain sets consumer.is_draining
   - consumer.is_draining reflects stop_pulling state
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -25,6 +26,7 @@ from hfa_worker.main import WorkerService
 # ---------------------------------------------------------------------------
 # WorkerConsumer lifecycle
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_consumer_start_close_no_task_leak():
@@ -104,16 +106,20 @@ async def test_consumer_inflight_count_reflects_set():
 # WorkerService lifecycle
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_worker_service_start_shutdown():
     redis = faredis.FakeRedis()
-    svc = WorkerService(redis, {
-        "worker_id": "ws-test-1",
-        "worker_group": "grp",
-        "shards": [0],
-        "capacity": 5,
-        "executor": FakeExecutor(),
-    })
+    svc = WorkerService(
+        redis,
+        {
+            "worker_id": "ws-test-1",
+            "worker_group": "grp",
+            "shards": [0],
+            "capacity": 5,
+            "executor": FakeExecutor(),
+        },
+    )
 
     await svc.start()
     assert svc.worker_id == "ws-test-1"
@@ -128,10 +134,13 @@ async def test_worker_service_start_shutdown():
 @pytest.mark.asyncio
 async def test_worker_service_worker_id_generated_if_absent():
     redis = faredis.FakeRedis()
-    svc = WorkerService(redis, {
-        "executor": FakeExecutor(),
-        "shards": [0],
-    })
+    svc = WorkerService(
+        redis,
+        {
+            "executor": FakeExecutor(),
+            "shards": [0],
+        },
+    )
     assert svc.worker_id.startswith("worker-")
     await svc.start()
     await asyncio.wait_for(svc.graceful_shutdown(drain_timeout=0.2), timeout=3.0)
@@ -140,6 +149,7 @@ async def test_worker_service_worker_id_generated_if_absent():
 # ---------------------------------------------------------------------------
 # DrainManager integration with consumer
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_drain_manager_calls_stop_pulling():

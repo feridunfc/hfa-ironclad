@@ -8,6 +8,7 @@ Verifies:
   - metric calls never raise (fire-and-forget contract)
   - consumer.py emits correct metric increments on execution outcomes
 """
+
 from __future__ import annotations
 
 import time
@@ -33,6 +34,7 @@ def reset_metrics():
 # ---------------------------------------------------------------------------
 # Unit — primitive metric types
 # ---------------------------------------------------------------------------
+
 
 def test_counter_increments():
     M.runs_started_total.inc()
@@ -77,7 +79,7 @@ def test_reset_all_zeros_everything():
 
 def test_counter_never_raises_on_negative():
     # Contract: fire-and-forget — no exceptions
-    M.runs_completed_total.inc(-1)   # edge case: negative amount still accepted
+    M.runs_completed_total.inc(-1)  # edge case: negative amount still accepted
 
 
 def test_all_sprint12_counters_exist():
@@ -109,6 +111,7 @@ def test_all_sprint12_counters_exist():
 # ---------------------------------------------------------------------------
 # Integration — consumer emits metrics on success
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_consumer_increments_runs_started_and_completed():

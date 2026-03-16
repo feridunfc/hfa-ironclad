@@ -8,6 +8,7 @@ Guardian fixes applied:
   8. Cache type corrected: Dict[str, tuple[float, ResearchResult]]
      (was tuple[float, List[RetrievalTrace]] — wrong, result was stored not traces)
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -39,10 +40,10 @@ class ResearcherService:
         max_sources: int = 5,
         cache_ttl: int = 3600,
     ) -> None:
-        self._llm           = llm_client
+        self._llm = llm_client
         self._search_enabled = search_enabled
-        self._max_sources   = max_sources
-        self._cache_ttl     = cache_ttl
+        self._max_sources = max_sources
+        self._cache_ttl = cache_ttl
 
         # ✅ Guardian fix #8: correct type — stores ResearchResult, not List[RetrievalTrace]
         self._cache: dict[str, tuple[float, ResearchResult]] = {}
@@ -63,12 +64,10 @@ class ResearcherService:
         Returns:
             ResearchResult with summary, traces, citations, total_tokens.
         """
-        logger.info(
-            "Researching: %.100s (tenant=%s)", request.query, request.tenant_id
-        )
+        logger.info("Researching: %.100s (tenant=%s)", request.query, request.tenant_id)
 
         cache_key = self._cache_key(request.query, request.sources)
-        cached    = self._from_cache(cache_key)
+        cached = self._from_cache(cache_key)
         if cached:
             logger.info("Cache hit: %.50s", request.query)
             return cached
@@ -96,9 +95,7 @@ class ResearcherService:
         # ✅ fix #8: cache stores full ResearchResult
         self._cache[cache_key] = (time.time(), result)
 
-        logger.info(
-            "Research done: %d sources, %d tokens", len(traces), total_tokens
-        )
+        logger.info("Research done: %d sources, %d tokens", len(traces), total_tokens)
         return result
 
     # ------------------------------------------------------------------
@@ -144,9 +141,7 @@ class ResearcherService:
             for i in range(min(limit, 3))
         ]
 
-    async def _process_source(
-        self, query: str, source: str
-    ) -> Optional[RetrievalTrace]:
+    async def _process_source(self, query: str, source: str) -> Optional[RetrievalTrace]:
         """Fetch and score a single source."""
         await asyncio.sleep(0.05)
         return RetrievalTrace(
@@ -169,8 +164,7 @@ class ResearcherService:
         ResearchSummary(summary: str, citations: list[str]) is that model.
         """
         context = "\n\n".join(
-            f"[{i+1}] ({t.source}): {t.content_snippet}"
-            for i, t in enumerate(traces)
+            f"[{i + 1}] ({t.source}): {t.content_snippet}" for i, t in enumerate(traces)
         )
 
         system_prompt = (

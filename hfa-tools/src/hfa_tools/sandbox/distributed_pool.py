@@ -18,6 +18,7 @@ IRONCLAD rules
 * Fail-closed: SandboxClusterError when no healthy nodes.
 * close() always safe.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -28,10 +29,10 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from hfa.obs.metrics import HFAMetrics              # Sprint 7 Faz 2
+from hfa.obs.metrics import HFAMetrics  # Sprint 7 Faz 2
 from hfa.obs.tracing import get_tracer, HFATracing  # Sprint 8 Mini 3
 
-logger  = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 _tracer = get_tracer("hfa.sandbox")
 
 
@@ -39,25 +40,27 @@ _tracer = get_tracer("hfa.sandbox")
 # Node model
 # ---------------------------------------------------------------------------
 
+
 class NodeHealth(str, Enum):
-    HEALTHY   = "healthy"
-    DEGRADED  = "degraded"
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
     UNHEALTHY = "unhealthy"
 
 
 @dataclass
 class SandboxNode:
     """Single node in the distributed sandbox cluster."""
-    node_id:   str
-    host:      str
-    port:      int            = 2376
-    capacity:  int            = 10
-    languages: List[str]      = field(default_factory=lambda: ["python", "node"])
-    health:    NodeHealth     = NodeHealth.HEALTHY
-    active:    int            = 0
-    last_seen: float          = field(default_factory=time.time)
-    weight:    int            = 10
-    labels:    Dict[str, str] = field(default_factory=dict)
+
+    node_id: str
+    host: str
+    port: int = 2376
+    capacity: int = 10
+    languages: List[str] = field(default_factory=lambda: ["python", "node"])
+    health: NodeHealth = NodeHealth.HEALTHY
+    active: int = 0
+    last_seen: float = field(default_factory=time.time)
+    weight: int = 10
+    labels: Dict[str, str] = field(default_factory=dict)
 
     @property
     def available_slots(self) -> int:
@@ -89,16 +92,17 @@ class SandboxNode:
 # Execution result
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class SandboxResult:
-    run_id:      str
-    node_id:     str
-    language:    str
-    stdout:      str
-    stderr:      str
-    exit_code:   int
+    run_id: str
+    node_id: str
+    language: str
+    stdout: str
+    stderr: str
+    exit_code: int
     duration_ms: float
-    timed_out:   bool = False
+    timed_out: bool = False
 
     @property
     def success(self) -> bool:
@@ -109,13 +113,13 @@ class SandboxResult:
 # Errors
 # ---------------------------------------------------------------------------
 
+
 class SandboxClusterError(Exception):
     """No healthy nodes available (fail-closed)."""
+
     def __init__(self, language: str, node_count: int) -> None:
-        super().__init__(
-            f"No healthy nodes for language={language!r} (total={node_count})"
-        )
-        self.language   = language
+        super().__init__(f"No healthy nodes for language={language!r} (total={node_count})")
+        self.language = language
         self.node_count = node_count
 
 
@@ -127,6 +131,7 @@ class SandboxExecutionError(Exception):
 # NodeSelector
 # ---------------------------------------------------------------------------
 
+
 class NodeSelector:
     """
     Weighted round-robin node selection.
@@ -136,10 +141,7 @@ class NodeSelector:
     """
 
     def select(self, nodes: List[SandboxNode], language: str) -> SandboxNode:
-        eligible = [
-            n for n in nodes
-            if n.is_available and language in n.languages
-        ]
+        eligible = [n for n in nodes if n.is_available and language in n.languages]
         if not eligible:
             raise SandboxClusterError(language, len(nodes))
         eligible.sort(key=lambda n: (n.load_factor, -n.weight, n.node_id))
@@ -150,22 +152,21 @@ class NodeSelector:
 # NodeHealthMonitor
 # ---------------------------------------------------------------------------
 
+
 class NodeHealthMonitor:
     """Background task: HEALTHY -> DEGRADED -> UNHEALTHY based on heartbeat age."""
 
     def __init__(self, stale_threshold: float = 30.0, check_interval: float = 10.0) -> None:
-        self._stale     = stale_threshold
-        self._degraded  = stale_threshold / 2
-        self._interval  = check_interval
-        self._task:     Optional[asyncio.Task] = None
-        self._nodes:    Dict[str, SandboxNode] = {}
+        self._stale = stale_threshold
+        self._degraded = stale_threshold / 2
+        self._interval = check_interval
+        self._task: Optional[asyncio.Task] = None
+        self._nodes: Dict[str, SandboxNode] = {}
 
     def start(self, nodes: Dict[str, SandboxNode]) -> None:
         self._nodes = nodes
-        loop        = asyncio.get_running_loop()
-        self._task  = loop.create_task(
-            self._loop(), name="sandbox.health_monitor"
-        )
+        loop = asyncio.get_running_loop()
+        self._task = loop.create_task(self._loop(), name="sandbox.health_monitor")
         logger.info("NodeHealthMonitor started")
 
     async def stop(self) -> None:
@@ -206,6 +207,7 @@ class NodeHealthMonitor:
 # DistributedSandboxPool
 # ---------------------------------------------------------------------------
 
+
 class DistributedSandboxPool:
     """
     Cluster-aware sandbox pool with Redis node discovery.
@@ -219,19 +221,19 @@ class DistributedSandboxPool:
 
     def __init__(
         self,
-        redis_client            = None,
+        redis_client=None,
         heartbeat_interval: float = 15.0,
-        stale_threshold:    float = 30.0,
-        local_node:         Optional[SandboxNode] = None,
+        stale_threshold: float = 30.0,
+        local_node: Optional[SandboxNode] = None,
     ) -> None:
-        self._redis              = redis_client
+        self._redis = redis_client
         self._heartbeat_interval = heartbeat_interval
-        self._nodes:             Dict[str, SandboxNode] = {}
-        self._selector           = NodeSelector()
-        self._monitor            = NodeHealthMonitor(stale_threshold=stale_threshold)
-        self._lock               = asyncio.Lock()
-        self._running            = False
-        self._discovery_task:    Optional[asyncio.Task] = None
+        self._nodes: Dict[str, SandboxNode] = {}
+        self._selector = NodeSelector()
+        self._monitor = NodeHealthMonitor(stale_threshold=stale_threshold)
+        self._lock = asyncio.Lock()
+        self._running = False
+        self._discovery_task: Optional[asyncio.Task] = None
 
         if local_node:
             self._nodes[local_node.node_id] = local_node
@@ -289,11 +291,11 @@ class DistributedSandboxPool:
 
     async def execute(
         self,
-        run_id:   str,
+        run_id: str,
         language: str,
-        code:     str,
-        timeout:  int = 30,
-        stdin:    Optional[str] = None,
+        code: str,
+        timeout: int = 30,
+        stdin: Optional[str] = None,
     ) -> SandboxResult:
         """
         Execute code on the best available node.
@@ -313,11 +315,14 @@ class DistributedSandboxPool:
         HFAMetrics.inc_sandbox_slots(node.node_id)
 
         with _tracer.start_as_current_span("hfa.sandbox.execute") as span:
-            HFATracing.set_attrs(span, {
-                "hfa.run_id":  run_id,
-                "hfa.language": language,
-                "hfa.node_id": node.node_id,
-            })
+            HFATracing.set_attrs(
+                span,
+                {
+                    "hfa.run_id": run_id,
+                    "hfa.language": language,
+                    "hfa.node_id": node.node_id,
+                },
+            )
 
             try:
                 result = await self._run_on_node(node, run_id, language, code, timeout, stdin)
@@ -325,7 +330,10 @@ class DistributedSandboxPool:
                 HFATracing.span_ok(span)
                 logger.info(
                     "Sandbox execute: run=%s node=%s exit=%d duration=%.0fms",
-                    run_id, node.node_id, result.exit_code, result.duration_ms,
+                    run_id,
+                    node.node_id,
+                    result.exit_code,
+                    result.duration_ms,
                 )
                 return result
 
@@ -333,8 +341,9 @@ class DistributedSandboxPool:
                 async with self._lock:
                     node.health = NodeHealth.DEGRADED
                 HFATracing.record_exc(span, exc)
-                logger.error("Sandbox execute FAILED: run=%s node=%s: %s",
-                             run_id, node.node_id, exc)
+                logger.error(
+                    "Sandbox execute FAILED: run=%s node=%s: %s", run_id, node.node_id, exc
+                )
                 raise SandboxExecutionError(str(exc)) from exc
 
             finally:
@@ -349,14 +358,14 @@ class DistributedSandboxPool:
 
     async def _run_on_node(
         self,
-        node:     SandboxNode,
-        run_id:   str,
+        node: SandboxNode,
+        run_id: str,
         language: str,
-        code:     str,
-        timeout:  int,
-        stdin:    Optional[str],
+        code: str,
+        timeout: int,
+        stdin: Optional[str],
     ) -> SandboxResult:
-        loop  = asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()
         start = time.time()
         timed_out = False
         try:
@@ -371,23 +380,22 @@ class DistributedSandboxPool:
             timed_out, stdout, stderr, exit_code = True, "", "Execution timeout", 124
 
         return SandboxResult(
-            run_id      = run_id,
-            node_id     = node.node_id,
-            language    = language,
-            stdout      = stdout,
-            stderr      = stderr,
-            exit_code   = exit_code,
-            duration_ms = (time.time() - start) * 1000,
-            timed_out   = timed_out,
+            run_id=run_id,
+            node_id=node.node_id,
+            language=language,
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            duration_ms=(time.time() - start) * 1000,
+            timed_out=timed_out,
         )
 
     @staticmethod
-    def _docker_exec(
-        node: SandboxNode, language: str, code: str, stdin: Optional[str]
-    ) -> tuple:
+    def _docker_exec(node: SandboxNode, language: str, code: str, stdin: Optional[str]) -> tuple:
         import subprocess
         import tempfile
         import os
+
         interp = {"python": "python3", "node": "node"}.get(language, language)
         suffix = {"python": ".py", "node": ".js"}.get(language, ".txt")
         with tempfile.NamedTemporaryFile(mode="w", suffix=suffix, delete=False) as f:
@@ -395,7 +403,11 @@ class DistributedSandboxPool:
             fpath = f.name
         try:
             r = subprocess.run(
-                [interp, fpath], capture_output=True, text=True, input=stdin, timeout=30,
+                [interp, fpath],
+                capture_output=True,
+                text=True,
+                input=stdin,
+                timeout=30,
             )
             return r.stdout, r.stderr, r.returncode
         except subprocess.TimeoutExpired:

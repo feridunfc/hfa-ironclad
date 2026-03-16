@@ -20,32 +20,36 @@ IRONCLAD rules
 * cost_cents: int — no float USD.
 * close() not needed (no background tasks).
 """
+
 from __future__ import annotations
 
 import logging
 
 from hfa.events.schema import RunAdmittedEvent
-from hfa.events.codec  import serialize_event
+from hfa.events.codec import serialize_event
 
 try:
-    from hfa.governance.quota_manager import QuotaManager           # type: ignore
-    from hfa_tools.middleware.tenant  import validate_run_id_format  # type: ignore
-    from hfa_tools.middleware.tenant  import TenantFormatError       # type: ignore
+    from hfa.governance.quota_manager import QuotaManager  # type: ignore
+    from hfa_tools.middleware.tenant import validate_run_id_format  # type: ignore
+    from hfa_tools.middleware.tenant import TenantFormatError  # type: ignore
 except ImportError:
     # Allow isolated testing without full hfa-tools dependency
-    QuotaManager            = None   # type: ignore
-    validate_run_id_format  = None   # type: ignore
-    TenantFormatError       = Exception
+    QuotaManager = None  # type: ignore
+    validate_run_id_format = None  # type: ignore
+    TenantFormatError = Exception
 
 try:
-    from hfa.obs.tracing import get_tracer, HFATracing               # type: ignore
+    from hfa.obs.tracing import get_tracer, HFATracing  # type: ignore
+
     _tracer = get_tracer("hfa.admission")
 except Exception:
     _tracer = None
 
 from hfa_control.exceptions import (
-    AdmissionError, QuotaExceededError,
-    RateLimitedError, BudgetExceededError,
+    AdmissionError,
+    QuotaExceededError,
+    RateLimitedError,
+    BudgetExceededError,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,19 +57,25 @@ logger = logging.getLogger(__name__)
 
 def _noop_span():
     """Minimal no-op context manager when OTel is not available."""
+
     class _Span:
-        def __enter__(self): return self
-        def __exit__(self, *_): pass
-        def set_attribute(self, *_): pass
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def set_attribute(self, *_):
+            pass
+
     return _Span()
 
 
 class AdmissionController:
-
     def __init__(self, redis, config) -> None:
-        self._redis  = redis
+        self._redis = redis
         self._config = config
-        self._quota  = QuotaManager(redis) if QuotaManager else None
+        self._quota = QuotaManager(redis) if QuotaManager else None
 
     async def admit(self, request) -> str:
         """
@@ -81,11 +91,12 @@ class AdmissionController:
         """
         span = (
             _tracer.start_as_current_span("hfa.admission.admit")
-            if _tracer else _noop_span()
+            if _tracer
+            else _noop_span()
         )
         with span as sp:
-            _set_attr(sp, "hfa.run_id",     request.run_id)
-            _set_attr(sp, "hfa.tenant_id",  request.tenant_id)
+            _set_attr(sp, "hfa.run_id", request.run_id)
+            _set_attr(sp, "hfa.tenant_id", request.tenant_id)
             _set_attr(sp, "hfa.agent_type", request.agent_type)
 
             try:
@@ -168,8 +179,10 @@ class AdmissionController:
 
                 logger.info(
                     "Admitted: run=%s tenant=%s agent=%s priority=%d",
-                    request.run_id, request.tenant_id,
-                    request.agent_type, request.priority,
+                    request.run_id,
+                    request.tenant_id,
+                    request.agent_type,
+                    request.priority,
                 )
                 _set_attr(sp, "hfa.admitted", "true")
                 return request.run_id
@@ -181,7 +194,9 @@ class AdmissionController:
                 _set_attr(sp, "hfa.admitted", "false")
                 logger.error(
                     "AdmissionController.admit unexpected error: run=%s %s",
-                    request.run_id, exc, exc_info=True,
+                    request.run_id,
+                    exc,
+                    exc_info=True,
                 )
                 raise
 

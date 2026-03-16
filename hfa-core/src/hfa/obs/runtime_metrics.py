@@ -25,6 +25,7 @@ IRONCLAD rules
 * Never raise from metric calls.
 * reset_all() only for test isolation.
 """
+
 from __future__ import annotations
 
 import logging
@@ -202,7 +203,9 @@ class IRONCLADMetrics:
     # Scheduling
     scheduling_attempts_total: _Counter = _counter("scheduling_attempts_total")
     scheduling_failures_total: _Counter = _counter("scheduling_failures_total")
-    workers_excluded_draining_total: _Counter = _counter("workers_excluded_draining_total")
+    workers_excluded_draining_total: _Counter = _counter(
+        "workers_excluded_draining_total"
+    )
 
     # Recovery
     recovery_stale_detected_total: _Counter = _counter("recovery_stale_detected_total")

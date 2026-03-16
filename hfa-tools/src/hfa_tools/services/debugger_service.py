@@ -23,6 +23,7 @@ IRONCLAD rules
 * All error paths raise typed exceptions (never bare Exception swallow).
 * Compliance check is fail-closed: DENY/HITL → raise DebuggerComplianceError.
 """
+
 from __future__ import annotations
 
 import logging
@@ -39,6 +40,7 @@ logger = logging.getLogger(__name__)
 # Internal LLM response model
 # ---------------------------------------------------------------------------
 
+
 class DebugFixSuggestion(BaseModel):
     """
     Structured LLM output for a debugging fix.
@@ -46,14 +48,16 @@ class DebugFixSuggestion(BaseModel):
     The LLM is asked to return a JSON object matching this schema.
     Fields align 1:1 with what DebuggerOutput needs.
     """
-    explanation:  str   = Field(..., min_length=10, max_length=2_000)
-    confidence:   float = Field(..., ge=0.0, le=1.0)
-    fixed_files:  list[dict] = Field(..., min_length=0)  # list of CodeChange-like dicts
+
+    explanation: str = Field(..., min_length=10, max_length=2_000)
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    fixed_files: list[dict] = Field(..., min_length=0)  # list of CodeChange-like dicts
 
 
 # ---------------------------------------------------------------------------
 # Typed errors
 # ---------------------------------------------------------------------------
+
 
 class DebuggerError(Exception):
     """Base class for debugger service errors."""
@@ -65,7 +69,7 @@ class DebuggerComplianceError(DebuggerError):
     def __init__(self, decision: str, summary: str) -> None:
         super().__init__(f"Fix blocked by compliance: {decision} — {summary}")
         self.decision = decision
-        self.summary  = summary
+        self.summary = summary
 
 
 class DebuggerLLMError(DebuggerError):
@@ -75,6 +79,7 @@ class DebuggerLLMError(DebuggerError):
 # ---------------------------------------------------------------------------
 # DebuggerService
 # ---------------------------------------------------------------------------
+
 
 class DebuggerService:
     """
@@ -95,9 +100,9 @@ class DebuggerService:
         compliance_policy=None,
         max_prompt_chars: int = 8_000,
     ) -> None:
-        self._llm               = llm_client
-        self._compliance        = compliance_policy
-        self._max_prompt_chars  = max_prompt_chars
+        self._llm = llm_client
+        self._compliance = compliance_policy
+        self._max_prompt_chars = max_prompt_chars
         logger.info(
             "DebuggerService created: compliance=%s",
             "enabled" if compliance_policy else "disabled",
@@ -109,10 +114,10 @@ class DebuggerService:
 
     async def fix(
         self,
-        code_set:     CodeChangeSet,
+        code_set: CodeChangeSet,
         test_results: TestSuiteResult,
-        run_id:       str,
-        tenant_id:    str,
+        run_id: str,
+        tenant_id: str,
     ) -> DebuggerOutput:
         """
         Generate a fixed CodeChangeSet for failing tests.
@@ -135,15 +140,18 @@ class DebuggerService:
 
         logger.info(
             "Debugger.fix: tenant=%s run=%s failing=%d/%d",
-            tenant_id, run_id, len(failed_tests), len(test_results.results),
+            tenant_id,
+            run_id,
+            len(failed_tests),
+            len(test_results.results),
         )
 
         if not failed_tests:
             logger.info("No failing tests — nothing to fix for run=%s", run_id)
             return DebuggerOutput(
-                fixed_code_set = code_set,
-                explanation    = "All tests already passing — no fix needed.",
-                confidence     = 1.0,
+                fixed_code_set=code_set,
+                explanation="All tests already passing — no fix needed.",
+                confidence=1.0,
             )
 
         prompt = self._build_prompt(code_set, failed_tests)
@@ -151,32 +159,32 @@ class DebuggerService:
         # ── LLM call ─────────────────────────────────────────────────────
         try:
             suggestion: DebugFixSuggestion = await self._llm.generate_structured(
-                prompt         = prompt,
-                response_model = DebugFixSuggestion,
-                temperature    = 0.1,   # low temp → deterministic fixes
+                prompt=prompt,
+                response_model=DebugFixSuggestion,
+                temperature=0.1,  # low temp → deterministic fixes
             )
         except HTTPException:
-            raise   # pass through FastAPI 503
+            raise  # pass through FastAPI 503
         except Exception as exc:
-            logger.error(
-                "Debugger LLM call failed: run=%s error=%s", run_id, exc, exc_info=True
-            )
+            logger.error("Debugger LLM call failed: run=%s error=%s", run_id, exc, exc_info=True)
             raise DebuggerLLMError(f"LLM fix generation failed: {exc}") from exc
 
         logger.info(
             "Debugger fix generated: run=%s confidence=%.2f files=%d",
-            run_id, suggestion.confidence, len(suggestion.fixed_files),
+            run_id,
+            suggestion.confidence,
+            len(suggestion.fixed_files),
         )
 
         # ── Build fixed CodeChangeSet ────────────────────────────────────
         fixed_changes = self._apply_suggestion(code_set, suggestion)
         fixed_code_set = CodeChangeSet(
-            change_set_id = f"fix-{code_set.change_set_id}",
-            plan_id       = code_set.plan_id,
-            changes       = fixed_changes if fixed_changes else code_set.changes,
-            language      = code_set.language,
-            framework     = code_set.framework,
-            total_tokens  = code_set.total_tokens,
+            change_set_id=f"fix-{code_set.change_set_id}",
+            plan_id=code_set.plan_id,
+            changes=fixed_changes if fixed_changes else code_set.changes,
+            language=code_set.language,
+            framework=code_set.framework,
+            total_tokens=code_set.total_tokens,
         )
 
         # ── Compliance gate ───────────────────────────────────────────────
@@ -184,13 +192,11 @@ class DebuggerService:
             await self._check_compliance(suggestion, run_id)
 
         output = DebuggerOutput(
-            fixed_code_set = fixed_code_set,
-            explanation    = suggestion.explanation,
-            confidence     = suggestion.confidence,
+            fixed_code_set=fixed_code_set,
+            explanation=suggestion.explanation,
+            confidence=suggestion.confidence,
         )
-        logger.info(
-            "Debugger.fix complete: run=%s confidence=%.2f", run_id, output.confidence
-        )
+        logger.info("Debugger.fix complete: run=%s confidence=%.2f", run_id, output.confidence)
         return output
 
     async def close(self) -> None:
@@ -204,7 +210,7 @@ class DebuggerService:
 
     def _build_prompt(
         self,
-        code_set:     CodeChangeSet,
+        code_set: CodeChangeSet,
         failed_tests: list,
     ) -> str:
         """
@@ -255,7 +261,7 @@ class DebuggerService:
 
     @staticmethod
     def _apply_suggestion(
-        code_set:   CodeChangeSet,
+        code_set: CodeChangeSet,
         suggestion: DebugFixSuggestion,
     ) -> list[CodeChange]:
         """
@@ -278,18 +284,18 @@ class DebuggerService:
             if path in existing:
                 old = existing[path]
                 existing[path] = CodeChange(
-                    file_path         = path,
-                    old_content_hash  = old.old_content_hash,
-                    new_content       = new_content,
-                    change_type       = change_type,
+                    file_path=path,
+                    old_content_hash=old.old_content_hash,
+                    new_content=new_content,
+                    change_type=change_type,
                 )
             else:
                 # New file introduced by fix
                 try:
                     existing[path] = CodeChange(
-                        file_path    = path,
-                        new_content  = new_content,
-                        change_type  = "create",
+                        file_path=path,
+                        new_content=new_content,
+                        change_type="create",
                     )
                 except Exception:
                     logger.warning("Debugger: skipping invalid file_path=%r", path)
@@ -299,7 +305,7 @@ class DebuggerService:
     async def _check_compliance(
         self,
         suggestion: DebugFixSuggestion,
-        run_id:     str,
+        run_id: str,
     ) -> None:
         """
         Run compliance policy against the generated fix.
@@ -309,17 +315,20 @@ class DebuggerService:
         """
         # Build a finding from the suggestion for compliance scanning
         finding = {
-            "message":    suggestion.explanation,
-            "severity":   "low" if suggestion.confidence >= 0.8 else "medium",
-            "source":     "llm_fix",
+            "message": suggestion.explanation,
+            "severity": "low" if suggestion.confidence >= 0.8 else "medium",
+            "source": "llm_fix",
             "confidence": suggestion.confidence,
         }
         result = self._compliance.evaluate_all([finding])
 
         from hfa.governance.compliance_policy import PolicyAction
+
         if result.decision in (PolicyAction.DENY, PolicyAction.HITL):
             logger.warning(
                 "Debugger compliance BLOCKED: run=%s decision=%s summary=%s",
-                run_id, result.decision.value, result.summary,
+                run_id,
+                result.decision.value,
+                result.summary,
             )
             raise DebuggerComplianceError(result.decision.value, result.summary)

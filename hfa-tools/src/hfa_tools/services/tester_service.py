@@ -7,6 +7,7 @@ Guardian fixes applied:
      (tar stream + put_archive) instead of asyncio.sleep() placeholder.
      run_command() is used to execute pytest directly — no code injection.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -34,8 +35,13 @@ class TesterService:
 
     _TEST_COMMANDS: dict[str, list[str]] = {
         "python": [
-            "python3", "-m", "pytest", "/workspace",
-            "-v", "--tb=short", "--no-header",
+            "python3",
+            "-m",
+            "pytest",
+            "/workspace",
+            "-v",
+            "--tb=short",
+            "--no-header",
         ],
         "javascript": ["npm", "test", "--", "--ci"],
         "typescript": ["npm", "test", "--", "--ci"],
@@ -46,7 +52,7 @@ class TesterService:
         sandbox_pool: SandboxPool,
         test_timeout: int = 60,
     ) -> None:
-        self._pool    = sandbox_pool
+        self._pool = sandbox_pool
         self._timeout = test_timeout
         logger.info("TesterService init: timeout=%ds", test_timeout)
 
@@ -90,12 +96,10 @@ class TesterService:
             await runner.write_files(all_files)
 
             # ✅ Guardian fix #6b: run_command() executes pytest directly
-            cmd    = self._get_test_cmd(language)
+            cmd = self._get_test_cmd(language)
             result = await runner.run_command(cmd, timeout=self._timeout)
 
-        test_results = self._parse_output(
-            result["output"], result["error"], result["exit_code"]
-        )
+        test_results = self._parse_output(result["output"], result["error"], result["exit_code"])
 
         # Fingerprint failures
         for tr in test_results:
@@ -164,40 +168,48 @@ class TesterService:
 
             if " PASSED" in line:
                 name = line.split(" PASSED")[0].strip() or f"test_{i}"
-                results.append(TestResult(
-                    test_id=safe_id,
-                    name=name,
-                    status="passed",
-                    duration_ms=0,
-                ))
+                results.append(
+                    TestResult(
+                        test_id=safe_id,
+                        name=name,
+                        status="passed",
+                        duration_ms=0,
+                    )
+                )
             elif " FAILED" in line:
                 name = line.split(" FAILED")[0].strip() or f"test_{i}"
-                results.append(TestResult(
-                    test_id=safe_id,
-                    name=name,
-                    status="failed",
-                    duration_ms=0,
-                    error_message=line[:1000],
-                ))
+                results.append(
+                    TestResult(
+                        test_id=safe_id,
+                        name=name,
+                        status="failed",
+                        duration_ms=0,
+                        error_message=line[:1000],
+                    )
+                )
             elif " ERROR" in line:
                 name = line.split(" ERROR")[0].strip() or f"test_{i}"
-                results.append(TestResult(
-                    test_id=safe_id,
-                    name=name,
-                    status="error",
-                    duration_ms=0,
-                    error_message=line[:1000],
-                ))
+                results.append(
+                    TestResult(
+                        test_id=safe_id,
+                        name=name,
+                        status="error",
+                        duration_ms=0,
+                        error_message=line[:1000],
+                    )
+                )
 
         if not results:
             # No test lines found — treat as single pass/fail based on exit code
-            results.append(TestResult(
-                test_id="test-result-fallback",
-                name="__default__",
-                status="passed" if exit_code == 0 else "error",
-                duration_ms=0,
-                error_message=(stderr or stdout)[:1000] if exit_code != 0 else None,
-            ))
+            results.append(
+                TestResult(
+                    test_id="test-result-fallback",
+                    name="__default__",
+                    status="passed" if exit_code == 0 else "error",
+                    duration_ms=0,
+                    error_message=(stderr or stdout)[:1000] if exit_code != 0 else None,
+                )
+            )
         return results
 
     @staticmethod
@@ -210,10 +222,10 @@ class TesterService:
         data = json.dumps(
             {
                 "test_name": tr.name,
-                "error":     tr.error_message,
-                "files":     [c.file_path for c in code_set.changes],
-                "language":  code_set.language,
-                "output":    exec_result.get("output", "")[:500],
+                "error": tr.error_message,
+                "files": [c.file_path for c in code_set.changes],
+                "language": code_set.language,
+                "output": exec_result.get("output", "")[:500],
             },
             sort_keys=True,
         )
@@ -221,26 +233,22 @@ class TesterService:
 
     @staticmethod
     def _summary(results: list[TestResult]) -> dict[str, Any]:
-        total   = len(results)
-        passed  = sum(1 for r in results if r.status == "passed")
-        failed  = sum(1 for r in results if r.status == "failed")
-        errors  = sum(1 for r in results if r.status == "error")
+        total = len(results)
+        passed = sum(1 for r in results if r.status == "passed")
+        failed = sum(1 for r in results if r.status == "failed")
+        errors = sum(1 for r in results if r.status == "error")
         skipped = sum(1 for r in results if r.status == "skipped")
         return {
-            "total":        total,
-            "passed":       passed,
-            "failed":       failed,
-            "errors":       errors,
-            "skipped":      skipped,
+            "total": total,
+            "passed": passed,
+            "failed": failed,
+            "errors": errors,
+            "skipped": skipped,
             "success_rate": round(passed / total * 100, 1) if total else 0.0,
         }
 
     @staticmethod
     def _basic_test(language: str) -> str:
         if language == "python":
-            return (
-                "import pytest\n\n"
-                "def test_basic():\n"
-                "    assert True\n"
-            )
+            return "import pytest\n\ndef test_basic():\n    assert True\n"
         return "// No tests provided"

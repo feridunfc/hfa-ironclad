@@ -2,6 +2,7 @@
 hfa-worker/src/hfa_worker/redis_utils.py
 Minimal Redis stream helpers for worker runtime.
 """
+
 from __future__ import annotations
 
 

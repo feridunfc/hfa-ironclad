@@ -18,6 +18,7 @@ Environment variables can be provided via:
   * Docker / Kubernetes secret mounts
   * HashiCorp Vault agent sidecar (writes to .env or shell env)
 """
+
 from __future__ import annotations
 
 import logging
@@ -41,7 +42,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=True,
-        extra="ignore",          # tolerate unknown env-vars silently
+        extra="ignore",  # tolerate unknown env-vars silently
     )
 
     # ------------------------------------------------------------------

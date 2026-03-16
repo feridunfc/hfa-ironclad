@@ -1,0 +1,108 @@
+$ErrorActionPreference = "Stop"
+
+Write-Host "==> 1) Restoring corrupted api/models.py from git"
+git restore --source=HEAD -- "hfa-control/src/hfa_control/api/models.py"
+
+Write-Host "==> 2) Writing temporary Python cleanup script"
+$py = @'
+from pathlib import Path
+import re
+
+def read(path: str) -> str:
+    return Path(path).read_text(encoding="utf-8")
+
+def write(path: str, content: str) -> None:
+    Path(path).write_text(content, encoding="utf-8", newline="\n")
+
+# -------------------------------------------------------------------
+# router.py: remove semicolon-style multi-statement residue
+# -------------------------------------------------------------------
+router = "hfa-control/src/hfa_control/api/router.py"
+c = read(router)
+c = c.replace("        schedulable = []; draining = []", "        schedulable = []\n        draining = []")
+write(router, c)
+
+# -------------------------------------------------------------------
+# hfa-worker/main.py: remove unused asyncio import
+# -------------------------------------------------------------------
+worker_main = "hfa-worker/src/hfa_worker/main.py"
+c = read(worker_main)
+c = c.replace("import asyncio\n", "")
+write(worker_main, c)
+
+# -------------------------------------------------------------------
+# tests/core/test_sprint12_backward_compat_events.py: remove unused pytest
+# -------------------------------------------------------------------
+p = "tests/core/test_sprint12_backward_compat_events.py"
+c = read(p)
+c = c.replace("import pytest\n", "")
+write(p, c)
+
+# -------------------------------------------------------------------
+# tests/core/test_sprint13_route_ordering.py:
+# - ensure import time is at top
+# - remove late import time
+# - remove unused ControlPlaneConfig import
+# -------------------------------------------------------------------
+p = "tests/core/test_sprint13_route_ordering.py"
+c = read(p)
+
+if "import time\n" not in c[:400]:
+    c = c.replace("from __future__ import annotations\n\n", "from __future__ import annotations\n\nimport time\n")
+
+c = c.replace("\nimport time\n\nasync def _seed(", "\n\nasync def _seed(")
+c = c.replace("    from hfa_control.models import ControlPlaneConfig\n", "")
+write(p, c)
+
+# -------------------------------------------------------------------
+# tests/core/test_sprint13_run_api.py: remove unused json
+# -------------------------------------------------------------------
+p = "tests/core/test_sprint13_run_api.py"
+c = read(p)
+c = c.replace("import json\n", "")
+write(p, c)
+
+# -------------------------------------------------------------------
+# tests/core/test_sprint13_service_queries.py:
+# remove unused imports and duplicate re-imports
+# -------------------------------------------------------------------
+p = "tests/core/test_sprint13_service_queries.py"
+c = read(p)
+c = c.replace("import json\n", "")
+c = c.replace("from hfa_control.models import ControlPlaneConfig, WorkerStatus\n", "from hfa_control.models import ControlPlaneConfig\n")
+c = c.replace("from hfa_control.registry import WorkerRegistry\n", "")
+c = c.replace("from hfa_control.recovery import RecoveryService\n", "")
+c = c.replace("    from hfa_control.registry import WorkerRegistry\n", "")
+c = c.replace("    from hfa_control.recovery import RecoveryService\n", "")
+write(p, c)
+
+# -------------------------------------------------------------------
+# tests/core/test_sprint13_worker_api.py: remove unused WorkerResponse
+# -------------------------------------------------------------------
+p = "tests/core/test_sprint13_worker_api.py"
+c = read(p)
+c = c.replace(
+    "from hfa_control.api.models import WorkerListResponse, WorkerSummary, WorkerResponse\n",
+    "from hfa_control.api.models import WorkerListResponse, WorkerSummary\n"
+)
+write(p, c)
+
+print("Targeted cleanup patches applied.")
+'@
+
+$TempPy = Join-Path $PWD ".fix_sprint13_once_tmp.py"
+Set-Content -Path $TempPy -Value $py -Encoding UTF8
+
+Write-Host "==> 3) Running temporary Python cleanup script"
+python $TempPy
+
+Write-Host "==> 4) Removing temporary Python cleanup script"
+Remove-Item $TempPy -Force
+
+Write-Host "==> 5) Running ruff autofix"
+python -m ruff check --fix hfa-core/src hfa-control/src hfa-worker/src hfa-tools/src tests/core
+
+Write-Host "==> 6) Running final ruff check"
+python -m ruff check hfa-core/src hfa-control/src hfa-worker/src hfa-tools/src tests/core
+
+Write-Host "==> Done"

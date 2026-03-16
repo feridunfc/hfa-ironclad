@@ -12,6 +12,7 @@ IRONCLAD rules
 * Never raise from decode_field() — return safe defaults on parse error.
 * cost_cents always int — no float USD.
 """
+
 from __future__ import annotations
 
 import json
@@ -136,7 +137,9 @@ def safe_decode_int(data: Dict[bytes, bytes], key: str, default: int = 0) -> int
         return default
 
 
-def safe_decode_float(data: Dict[bytes, bytes], key: str, default: float = 0.0) -> float:
+def safe_decode_float(
+    data: Dict[bytes, bytes], key: str, default: float = 0.0
+) -> float:
     raw = data.get(key.encode())
     if raw is None:
         raw = data.get(key)  # type: ignore[arg-type]
