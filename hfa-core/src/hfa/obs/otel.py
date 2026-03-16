@@ -22,6 +22,7 @@ IRONCLAD rules
   to no-ops so that hfa-core does not require opentelemetry at import time
   for unit tests.
 """
+
 from __future__ import annotations
 
 import logging
@@ -41,9 +42,12 @@ try:
     from opentelemetry.sdk.metrics import MeterProvider
     from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
     from opentelemetry.metrics import get_meter_provider, set_meter_provider
-    from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+    from opentelemetry.trace.propagation.tracecontext import (
+        TraceContextTextMapPropagator,
+    )
     from opentelemetry.baggage.propagation import W3CBaggagePropagator
     from opentelemetry.propagators.composite import CompositePropagator
+
     _OTEL_AVAILABLE = True
 except ImportError:
     _OTEL_AVAILABLE = False
@@ -54,25 +58,28 @@ except ImportError:
 # HFA Span attribute keys (constants)
 # ---------------------------------------------------------------------------
 
+
 class SpanAttr:
     """Standard attribute key constants for HFA spans."""
-    TENANT_ID       = "hfa.tenant_id"
-    RUN_ID          = "hfa.run_id"
-    AGENT_TYPE      = "hfa.agent_type"
-    ATTEMPT         = "hfa.healing.attempt"
-    TOKENS_USED     = "hfa.llm.tokens_used"
-    COST_CENTS      = "hfa.budget.cost_cents"      # ✅ integer cents
-    SANDBOX_LANG    = "hfa.sandbox.language"
-    TEST_STATUS     = "hfa.test.status"
-    COMPLIANCE      = "hfa.compliance.decision"
-    ERROR_FP        = "hfa.healing.error_fingerprint"
-    GRAPH_NODE_ID   = "hfa.graph.node_id"
-    GRAPH_DEPTH     = "hfa.graph.depth"
+
+    TENANT_ID = "hfa.tenant_id"
+    RUN_ID = "hfa.run_id"
+    AGENT_TYPE = "hfa.agent_type"
+    ATTEMPT = "hfa.healing.attempt"
+    TOKENS_USED = "hfa.llm.tokens_used"
+    COST_CENTS = "hfa.budget.cost_cents"  # ✅ integer cents
+    SANDBOX_LANG = "hfa.sandbox.language"
+    TEST_STATUS = "hfa.test.status"
+    COMPLIANCE = "hfa.compliance.decision"
+    ERROR_FP = "hfa.healing.error_fingerprint"
+    GRAPH_NODE_ID = "hfa.graph.node_id"
+    GRAPH_DEPTH = "hfa.graph.depth"
 
 
 # ---------------------------------------------------------------------------
 # OTel setup
 # ---------------------------------------------------------------------------
+
 
 class OTelConfig:
     """
@@ -94,19 +101,19 @@ class OTelConfig:
 
     def __init__(
         self,
-        service_name:    str = "hfa",
-        otlp_endpoint:   Optional[str] = None,
-        enabled:         bool = True,
+        service_name: str = "hfa",
+        otlp_endpoint: Optional[str] = None,
+        enabled: bool = True,
     ) -> None:
         import os
-        self.service_name  = os.getenv("OTEL_SERVICE_NAME", service_name)
-        self.otlp_endpoint = (
-            otlp_endpoint
-            or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
+
+        self.service_name = os.getenv("OTEL_SERVICE_NAME", service_name)
+        self.otlp_endpoint = otlp_endpoint or os.getenv(
+            "OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"
         )
         self.enabled = enabled
-        self._tracer:  Optional[Any] = None
-        self._meter:   Optional[Any] = None
+        self._tracer: Optional[Any] = None
+        self._meter: Optional[Any] = None
 
     def setup(self) -> None:
         """
@@ -114,31 +121,47 @@ class OTelConfig:
         No-op if opentelemetry SDK is not installed or enabled=False.
         """
         if not self.enabled or not _OTEL_AVAILABLE:
-            logger.info("OTel setup skipped (enabled=%s, sdk=%s)", self.enabled, _OTEL_AVAILABLE)
+            logger.info(
+                "OTel setup skipped (enabled=%s, sdk=%s)", self.enabled, _OTEL_AVAILABLE
+            )
             return
 
         try:
-            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-            from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
+            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+                OTLPSpanExporter,
+            )
+            from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
+                OTLPMetricExporter,
+            )
             from opentelemetry.sdk.resources import Resource
 
             resource = Resource.create({"service.name": self.service_name})
 
             # Tracer
-            span_exporter    = OTLPSpanExporter(endpoint=self.otlp_endpoint, insecure=True)
-            tracer_provider  = TracerProvider(resource=resource)
+            span_exporter = OTLPSpanExporter(endpoint=self.otlp_endpoint, insecure=True)
+            tracer_provider = TracerProvider(resource=resource)
             tracer_provider.add_span_processor(BatchSpanProcessor(span_exporter))
             trace.set_tracer_provider(tracer_provider)
 
             # Meter
-            metric_exporter  = OTLPMetricExporter(endpoint=self.otlp_endpoint, insecure=True)
-            metric_reader    = PeriodicExportingMetricReader(metric_exporter, export_interval_millis=15_000)
-            meter_provider   = MeterProvider(resource=resource, metric_readers=[metric_reader])
+            metric_exporter = OTLPMetricExporter(
+                endpoint=self.otlp_endpoint, insecure=True
+            )
+            metric_reader = PeriodicExportingMetricReader(
+                metric_exporter, export_interval_millis=15_000
+            )
+            meter_provider = MeterProvider(
+                resource=resource, metric_readers=[metric_reader]
+            )
             set_meter_provider(meter_provider)
 
             self._tracer = trace.get_tracer(self.service_name)
-            self._meter  = get_meter_provider().get_meter(self.service_name)
-            logger.info("OTel configured: service=%s endpoint=%s", self.service_name, self.otlp_endpoint)
+            self._meter = get_meter_provider().get_meter(self.service_name)
+            logger.info(
+                "OTel configured: service=%s endpoint=%s",
+                self.service_name,
+                self.otlp_endpoint,
+            )
         except Exception as exc:
             logger.warning("OTel setup failed (non-fatal): %s", exc)
 
@@ -171,9 +194,9 @@ def configure(cfg: OTelConfig) -> None:
 
 @contextmanager
 def create_span(
-    name:       str,
+    name: str,
     attributes: Optional[Dict[str, Any]] = None,
-    config:     Optional[OTelConfig] = None,
+    config: Optional[OTelConfig] = None,
 ) -> Generator:
     """
     Context manager that creates an OTel span if OTel is available,
@@ -194,8 +217,8 @@ def create_span(
     Yields:
         Active span object (set attributes on it), or None in no-op mode.
     """
-    cfg     = config or _default_config
-    tracer  = cfg.get_tracer() if cfg else None
+    cfg = config or _default_config
+    tracer = cfg.get_tracer() if cfg else None
 
     if tracer is None or not _OTEL_AVAILABLE:
         yield None
@@ -214,10 +237,10 @@ def create_span(
 
 
 def add_log_to_span(
-    message:    str,
-    level:      str = "INFO",
+    message: str,
+    level: str = "INFO",
     attributes: Optional[Dict[str, Any]] = None,
-    config:     Optional[OTelConfig] = None,
+    config: Optional[OTelConfig] = None,
 ) -> None:
     """
     Add a structured log event to the currently active OTel span.
@@ -259,10 +282,12 @@ def inject_trace_headers(headers: Dict[str, str]) -> Dict[str, str]:
     if not _OTEL_AVAILABLE:
         return headers
     try:
-        propagator = CompositePropagator([
-            TraceContextTextMapPropagator(),
-            W3CBaggagePropagator(),
-        ])
+        propagator = CompositePropagator(
+            [
+                TraceContextTextMapPropagator(),
+                W3CBaggagePropagator(),
+            ]
+        )
         propagator.inject(headers)
     except Exception as exc:
         logger.debug("inject_trace_headers failed (non-fatal): %s", exc)
@@ -283,10 +308,12 @@ def extract_trace_context(headers: Dict[str, str]) -> Any:
     if not _OTEL_AVAILABLE:
         return None
     try:
-        propagator = CompositePropagator([
-            TraceContextTextMapPropagator(),
-            W3CBaggagePropagator(),
-        ])
+        propagator = CompositePropagator(
+            [
+                TraceContextTextMapPropagator(),
+                W3CBaggagePropagator(),
+            ]
+        )
         return propagator.extract(headers)
     except Exception as exc:
         logger.debug("extract_trace_context failed (non-fatal): %s", exc)
@@ -296,6 +323,7 @@ def extract_trace_context(headers: Dict[str, str]) -> Any:
 # ---------------------------------------------------------------------------
 # HFAMetrics — typed metric helpers
 # ---------------------------------------------------------------------------
+
 
 class HFAMetrics:
     """
@@ -314,10 +342,10 @@ class HFAMetrics:
 
     def __init__(self, config: Optional[OTelConfig] = None) -> None:
         self._config = config or _default_config
-        self._meter  = None
-        self._counters:    Dict[str, Any] = {}
-        self._histograms:  Dict[str, Any] = {}
-        self._initialized  = False
+        self._meter = None
+        self._counters: Dict[str, Any] = {}
+        self._histograms: Dict[str, Any] = {}
+        self._initialized = False
 
     def _ensure_instruments(self) -> bool:
         """Lazily create metric instruments. Returns True if meter available."""
@@ -328,27 +356,49 @@ class HFAMetrics:
         if meter is None:
             return False
         self._meter = meter
-        self._counters["requests"]       = meter.create_counter("hfa.requests.total",    description="Total agent requests")
-        self._counters["errors"]         = meter.create_counter("hfa.errors.total",      description="Total agent errors")
-        self._counters["tokens"]         = meter.create_counter("hfa.llm.tokens.total",  description="LLM tokens used")
-        self._counters["cost_cents"]     = meter.create_counter("hfa.budget.cost_cents", description="Budget spent (integer cents)")
-        self._counters["healing_retries"]= meter.create_counter("hfa.healing.retries",   description="Healing engine retries")
-        self._counters["circuit_opens"]  = meter.create_counter("hfa.healing.circuit_opens", description="Circuit breaker openings")
-        self._histograms["latency_ms"]   = meter.create_histogram("hfa.request.duration_ms", unit="ms", description="Request latency")
-        self._histograms["sandbox_ms"]   = meter.create_histogram("hfa.sandbox.duration_ms", unit="ms", description="Sandbox execution latency")
+        self._counters["requests"] = meter.create_counter(
+            "hfa.requests.total", description="Total agent requests"
+        )
+        self._counters["errors"] = meter.create_counter(
+            "hfa.errors.total", description="Total agent errors"
+        )
+        self._counters["tokens"] = meter.create_counter(
+            "hfa.llm.tokens.total", description="LLM tokens used"
+        )
+        self._counters["cost_cents"] = meter.create_counter(
+            "hfa.budget.cost_cents", description="Budget spent (integer cents)"
+        )
+        self._counters["healing_retries"] = meter.create_counter(
+            "hfa.healing.retries", description="Healing engine retries"
+        )
+        self._counters["circuit_opens"] = meter.create_counter(
+            "hfa.healing.circuit_opens", description="Circuit breaker openings"
+        )
+        self._histograms["latency_ms"] = meter.create_histogram(
+            "hfa.request.duration_ms", unit="ms", description="Request latency"
+        )
+        self._histograms["sandbox_ms"] = meter.create_histogram(
+            "hfa.sandbox.duration_ms",
+            unit="ms",
+            description="Sandbox execution latency",
+        )
         return True
 
     def record_request(
         self,
-        agent_type:  str,
-        tenant_id:   str,
-        latency_ms:  float,
-        success:     bool = True,
+        agent_type: str,
+        tenant_id: str,
+        latency_ms: float,
+        success: bool = True,
     ) -> None:
         """Record a completed agent request."""
         if not self._ensure_instruments():
             return
-        attrs = {"agent": agent_type, "tenant": tenant_id, "success": str(success).lower()}
+        attrs = {
+            "agent": agent_type,
+            "tenant": tenant_id,
+            "success": str(success).lower(),
+        }
         self._counters["requests"].add(1, attrs)
         if not success:
             self._counters["errors"].add(1, attrs)
@@ -356,10 +406,10 @@ class HFAMetrics:
 
     def record_llm_tokens(
         self,
-        model:       str,
-        tokens:      int,
-        cost_cents:  int,    # ✅ integer cents
-        tenant_id:   str = "unknown",
+        model: str,
+        tokens: int,
+        cost_cents: int,  # ✅ integer cents
+        tenant_id: str = "unknown",
     ) -> None:
         """Record LLM token usage and cost."""
         if not self._ensure_instruments():
@@ -370,9 +420,9 @@ class HFAMetrics:
 
     def record_healing_retry(
         self,
-        tenant_id:  str,
-        run_id:     str,
-        attempt:    int,
+        tenant_id: str,
+        run_id: str,
+        attempt: int,
     ) -> None:
         """Record a healing engine retry attempt."""
         if not self._ensure_instruments():
@@ -388,9 +438,9 @@ class HFAMetrics:
 
     def record_sandbox(
         self,
-        language:    str,
+        language: str,
         duration_ms: float,
-        success:     bool,
+        success: bool,
     ) -> None:
         """Record sandbox execution metrics."""
         if not self._ensure_instruments():

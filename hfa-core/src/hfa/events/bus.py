@@ -31,6 +31,7 @@ IRONCLAD rules
 * Dead-letter: failed deliveries are logged with full context, never silently dropped.
 * SDK imports are lazy/optional — bus degrades to InMemory if SDK not installed.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -49,6 +50,7 @@ logger = logging.getLogger(__name__)
 # Event model
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class HFAEvent:
     """
@@ -64,13 +66,14 @@ class HFAEvent:
     timestamp:   Auto-set Unix epoch float.
     schema_ver:  Payload schema version (increment on breaking changes).
     """
-    event_type:  str
-    tenant_id:   str
-    run_id:      str
-    payload:     Dict[str, Any]
-    event_id:    str   = field(default_factory=lambda: str(uuid.uuid4()))
-    timestamp:   float = field(default_factory=time.time)
-    schema_ver:  int   = 1
+
+    event_type: str
+    tenant_id: str
+    run_id: str
+    payload: Dict[str, Any]
+    event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    timestamp: float = field(default_factory=time.time)
+    schema_ver: int = 1
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -81,13 +84,13 @@ class HFAEvent:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "HFAEvent":
         return cls(
-            event_type = data["event_type"],
-            tenant_id  = data["tenant_id"],
-            run_id     = data["run_id"],
-            payload    = data.get("payload", {}),
-            event_id   = data.get("event_id", str(uuid.uuid4())),
-            timestamp  = data.get("timestamp", time.time()),
-            schema_ver = data.get("schema_ver", 1),
+            event_type=data["event_type"],
+            tenant_id=data["tenant_id"],
+            run_id=data["run_id"],
+            payload=data.get("payload", {}),
+            event_id=data.get("event_id", str(uuid.uuid4())),
+            timestamp=data.get("timestamp", time.time()),
+            schema_ver=data.get("schema_ver", 1),
         )
 
     @classmethod
@@ -99,16 +102,16 @@ class HFAEvent:
 
 # Well-known event types
 class EventType:
-    RUN_STARTED     = "hfa.run.started"
-    RUN_DONE        = "hfa.run.done"
-    RUN_FAILED      = "hfa.run.failed"
-    NODE_STARTED    = "hfa.node.started"
-    NODE_DONE       = "hfa.node.done"
-    NODE_FAILED     = "hfa.node.failed"
+    RUN_STARTED = "hfa.run.started"
+    RUN_DONE = "hfa.run.done"
+    RUN_FAILED = "hfa.run.failed"
+    NODE_STARTED = "hfa.node.started"
+    NODE_DONE = "hfa.node.done"
+    NODE_FAILED = "hfa.node.failed"
     BUDGET_RESERVED = "hfa.budget.reserved"
     BUDGET_DEPLETED = "hfa.budget.depleted"
-    HEALING_RETRY   = "hfa.healing.retry"
-    CIRCUIT_OPENED  = "hfa.healing.circuit_opened"
+    HEALING_RETRY = "hfa.healing.retry"
+    CIRCUIT_OPENED = "hfa.healing.circuit_opened"
     COMPLIANCE_DENY = "hfa.compliance.denied"
 
 
@@ -119,6 +122,7 @@ Subscriber = Callable[[HFAEvent], Awaitable[None]]
 # ---------------------------------------------------------------------------
 # Abstract base
 # ---------------------------------------------------------------------------
+
 
 class EventBus(ABC):
     """
@@ -140,8 +144,8 @@ class EventBus(ABC):
     async def subscribe(
         self,
         event_type: str,
-        handler:    Subscriber,
-        tenant_id:  Optional[str] = None,
+        handler: Subscriber,
+        tenant_id: Optional[str] = None,
     ) -> str:
         """
         Register a subscriber for `event_type`.
@@ -169,12 +173,13 @@ class EventBus(ABC):
 # Subscription registry (shared by InMemory + other impls)
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class _Subscription:
-    sub_id:     str
-    event_type: str        # "*" = wildcard
-    handler:    Subscriber
-    tenant_id:  Optional[str]
+    sub_id: str
+    event_type: str  # "*" = wildcard
+    handler: Subscriber
+    tenant_id: Optional[str]
 
 
 class _SubscriptionRegistry:
@@ -187,13 +192,18 @@ class _SubscriptionRegistry:
     async def add(
         self,
         event_type: str,
-        handler:    Subscriber,
-        tenant_id:  Optional[str] = None,
+        handler: Subscriber,
+        tenant_id: Optional[str] = None,
     ) -> str:
         sub_id = str(uuid.uuid4())
         async with self._lock:
             self._subs[sub_id] = _Subscription(sub_id, event_type, handler, tenant_id)
-        logger.debug("EventBus.subscribe: sub_id=%s type=%s tenant=%s", sub_id, event_type, tenant_id)
+        logger.debug(
+            "EventBus.subscribe: sub_id=%s type=%s tenant=%s",
+            sub_id,
+            event_type,
+            tenant_id,
+        )
         return sub_id
 
     async def remove(self, sub_id: str) -> None:
@@ -206,7 +216,7 @@ class _SubscriptionRegistry:
         result = []
         for sub in self._subs.values():
             type_match = sub.event_type in ("*", event.event_type)
-            tenant_match = (sub.tenant_id is None or sub.tenant_id == event.tenant_id)
+            tenant_match = sub.tenant_id is None or sub.tenant_id == event.tenant_id
             if type_match and tenant_match:
                 result.append(sub)
         return result
@@ -215,6 +225,7 @@ class _SubscriptionRegistry:
 # ---------------------------------------------------------------------------
 # InMemoryEventBus
 # ---------------------------------------------------------------------------
+
 
 class InMemoryEventBus(EventBus):
     """
@@ -230,7 +241,7 @@ class InMemoryEventBus(EventBus):
     def __init__(self, delivery_timeout: float = 5.0) -> None:
         self._registry = _SubscriptionRegistry()
         self._delivery_timeout = delivery_timeout
-        self._published: List[HFAEvent] = []   # for test inspection
+        self._published: List[HFAEvent] = []  # for test inspection
         self._running = True
         logger.info("InMemoryEventBus created")
 
@@ -238,7 +249,9 @@ class InMemoryEventBus(EventBus):
         self._published.append(event)
         logger.debug(
             "EventBus.publish: type=%s tenant=%s run=%s",
-            event.event_type, event.tenant_id, event.run_id,
+            event.event_type,
+            event.tenant_id,
+            event.run_id,
         )
         subs = self._registry.matching(event)
         if not subs:
@@ -252,8 +265,8 @@ class InMemoryEventBus(EventBus):
     async def subscribe(
         self,
         event_type: str,
-        handler:    Subscriber,
-        tenant_id:  Optional[str] = None,
+        handler: Subscriber,
+        tenant_id: Optional[str] = None,
     ) -> str:
         return await self._registry.add(event_type, handler, tenant_id)
 
@@ -282,12 +295,17 @@ class InMemoryEventBus(EventBus):
         except asyncio.TimeoutError:
             logger.error(
                 "EventBus delivery TIMEOUT: sub=%s type=%s run=%s",
-                sub.sub_id, event.event_type, event.run_id,
+                sub.sub_id,
+                event.event_type,
+                event.run_id,
             )
         except Exception as exc:
             logger.error(
                 "EventBus delivery ERROR: sub=%s type=%s run=%s error=%s",
-                sub.sub_id, event.event_type, event.run_id, exc,
+                sub.sub_id,
+                event.event_type,
+                event.run_id,
+                exc,
                 exc_info=True,
             )
 
@@ -295,6 +313,7 @@ class InMemoryEventBus(EventBus):
 # ---------------------------------------------------------------------------
 # NATSEventBus — production implementation
 # ---------------------------------------------------------------------------
+
 
 class NATSEventBus(EventBus):
     """
@@ -314,15 +333,15 @@ class NATSEventBus(EventBus):
     def __init__(
         self,
         servers: List[str],
-        stream:  str = "HFA",
-        prefix:  str = "hfa",
+        stream: str = "HFA",
+        prefix: str = "hfa",
     ) -> None:
         self._servers = servers
-        self._stream  = stream
-        self._prefix  = prefix
-        self._nc      = None   # nats.Client
-        self._js      = None   # JetStream context
-        self._registry= _SubscriptionRegistry()
+        self._stream = stream
+        self._prefix = prefix
+        self._nc = None  # nats.Client
+        self._js = None  # JetStream context
+        self._registry = _SubscriptionRegistry()
         self._sub_handles: Dict[str, Any] = {}  # sub_id → nats subscription
         logger.info("NATSEventBus created: servers=%s stream=%s", servers, stream)
 
@@ -341,7 +360,7 @@ class NATSEventBus(EventBus):
             await self._js.add_stream(
                 name=self._stream,
                 subjects=[f"{self._prefix}.>"],
-                max_age=86400,      # 24h retention
+                max_age=86400,  # 24h retention
                 storage="file",
             )
         except Exception as exc:
@@ -359,15 +378,17 @@ class NATSEventBus(EventBus):
         except Exception as exc:
             logger.error(
                 "NATS publish FAILED (dead-letter): subject=%s event_id=%s error=%s",
-                subject, event.event_id, exc,
+                subject,
+                event.event_id,
+                exc,
             )
             # Dead-letter: do not raise — fire-and-forget contract
 
     async def subscribe(
         self,
         event_type: str,
-        handler:    Subscriber,
-        tenant_id:  Optional[str] = None,
+        handler: Subscriber,
+        tenant_id: Optional[str] = None,
     ) -> str:
         sub_id = await self._registry.add(event_type, handler, tenant_id)
 
@@ -423,7 +444,10 @@ class NATSEventBus(EventBus):
                         await msg.ack()
                     except Exception as exc:
                         logger.error(
-                            "NATS consumer error: sub=%s error=%s", sub_id, exc, exc_info=True
+                            "NATS consumer error: sub=%s error=%s",
+                            sub_id,
+                            exc,
+                            exc_info=True,
                         )
                         await msg.nak()
             except asyncio.CancelledError:
@@ -435,6 +459,7 @@ class NATSEventBus(EventBus):
 # ---------------------------------------------------------------------------
 # KafkaEventBus — high-throughput alternative
 # ---------------------------------------------------------------------------
+
 
 class KafkaEventBus(EventBus):
     """
@@ -454,17 +479,17 @@ class KafkaEventBus(EventBus):
 
     def __init__(
         self,
-        bootstrap_servers:  str = "localhost:9092",
-        default_topic:      str = "hfa-events",
-        num_partitions:     int = 6,
+        bootstrap_servers: str = "localhost:9092",
+        default_topic: str = "hfa-events",
+        num_partitions: int = 6,
         replication_factor: int = 1,
     ) -> None:
-        self._bootstrap     = bootstrap_servers
+        self._bootstrap = bootstrap_servers
         self._default_topic = default_topic
-        self._num_partitions= num_partitions
-        self._replication   = replication_factor
-        self._producer      = None
-        self._consumers: Dict[str, Any] = {}   # sub_id → consumer task
+        self._num_partitions = num_partitions
+        self._replication = replication_factor
+        self._producer = None
+        self._consumers: Dict[str, Any] = {}  # sub_id → consumer task
         self._registry = _SubscriptionRegistry()
         logger.info("KafkaEventBus created: brokers=%s", bootstrap_servers)
 
@@ -489,23 +514,23 @@ class KafkaEventBus(EventBus):
         try:
             await self._producer.send_and_wait(
                 topic,
-                value = event.to_json(),
-                key   = event.tenant_id.encode(),
+                value=event.to_json(),
+                key=event.tenant_id.encode(),
             )
-            logger.debug(
-                "Kafka publish: topic=%s event_id=%s", topic, event.event_id
-            )
+            logger.debug("Kafka publish: topic=%s event_id=%s", topic, event.event_id)
         except Exception as exc:
             logger.error(
                 "Kafka publish FAILED (dead-letter): topic=%s event_id=%s error=%s",
-                topic, event.event_id, exc,
+                topic,
+                event.event_id,
+                exc,
             )
 
     async def subscribe(
         self,
         event_type: str,
-        handler:    Subscriber,
-        tenant_id:  Optional[str] = None,
+        handler: Subscriber,
+        tenant_id: Optional[str] = None,
     ) -> str:
         try:
             from aiokafka import AIOKafkaConsumer
@@ -513,15 +538,17 @@ class KafkaEventBus(EventBus):
             raise ImportError("aiokafka required: pip install aiokafka")
 
         sub_id = await self._registry.add(event_type, handler, tenant_id)
-        topic   = self._topic_for(event_type) if event_type != "*" else self._default_topic
-        group   = f"hfa-{tenant_id or 'global'}"
+        topic = (
+            self._topic_for(event_type) if event_type != "*" else self._default_topic
+        )
+        group = f"hfa-{tenant_id or 'global'}"
 
         consumer = AIOKafkaConsumer(
             topic,
-            bootstrap_servers  = self._bootstrap,
-            group_id           = group,
-            auto_offset_reset  = "latest",
-            value_deserializer = lambda v: v.decode(),
+            bootstrap_servers=self._bootstrap,
+            group_id=group,
+            auto_offset_reset="latest",
+            value_deserializer=lambda v: v.decode(),
         )
         await consumer.start()
         loop = asyncio.get_running_loop()
@@ -552,9 +579,9 @@ class KafkaEventBus(EventBus):
 
     async def _consume(
         self,
-        sub_id:    str,
+        sub_id: str,
         consumer,
-        handler:   Subscriber,
+        handler: Subscriber,
         tenant_id: Optional[str],
     ) -> None:
         try:
@@ -566,7 +593,10 @@ class KafkaEventBus(EventBus):
                     await handler(event)
                 except Exception as exc:
                     logger.error(
-                        "Kafka consumer error: sub=%s error=%s", sub_id, exc, exc_info=True
+                        "Kafka consumer error: sub=%s error=%s",
+                        sub_id,
+                        exc,
+                        exc_info=True,
                     )
         except asyncio.CancelledError:
             pass

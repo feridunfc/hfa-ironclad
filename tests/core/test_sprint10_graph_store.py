@@ -2,6 +2,7 @@
 hfa-control/tests/test_sprint10_graph_store.py
 IRONCLAD Sprint 10 — GraphStore tests
 """
+
 from __future__ import annotations
 
 import json
@@ -12,7 +13,6 @@ from hfa.obs.graph_store import RedisGraphStore
 
 
 class TestRedisGraphStore:
-
     @pytest.mark.asyncio
     async def test_save_and_load_snapshot(self):
         redis = faredis.FakeRedis()
@@ -33,11 +33,19 @@ class TestRedisGraphStore:
     async def test_append_and_load_patches(self):
         redis = faredis.FakeRedis()
         store = RedisGraphStore(redis)
-        await store.append_patch("r2", {"seq": 0, "op": "node_started",
-                                         "node_id": "n1", "ts": 1.0, "data": {}})
-        await store.append_patch("r2", {"seq": 1, "op": "node_committed",
-                                         "node_id": "n1", "ts": 2.0,
-                                         "data": {"cost_cents": 10}})
+        await store.append_patch(
+            "r2", {"seq": 0, "op": "node_started", "node_id": "n1", "ts": 1.0, "data": {}}
+        )
+        await store.append_patch(
+            "r2",
+            {
+                "seq": 1,
+                "op": "node_committed",
+                "node_id": "n1",
+                "ts": 2.0,
+                "data": {"cost_cents": 10},
+            },
+        )
         patches = await store.load_patches("r2")
         assert len(patches) == 2
         # cost_cents must be int — no float USD
@@ -49,11 +57,12 @@ class TestRedisGraphStore:
         redis = faredis.FakeRedis()
         store = RedisGraphStore(redis)
         for i in range(5):
-            await store.append_patch("r3", {"seq": i, "op": "x",
-                                             "node_id": "n1", "ts": 0.0, "data": {}})
+            await store.append_patch(
+                "r3", {"seq": i, "op": "x", "node_id": "n1", "ts": 0.0, "data": {}}
+            )
         patches = await store.load_patches("r3", after_seq=3)
         assert all(p["seq"] >= 3 for p in patches)
-        assert len(patches) == 2   # seq 3 and 4
+        assert len(patches) == 2  # seq 3 and 4
 
     @pytest.mark.asyncio
     async def test_load_patches_empty_returns_empty_list(self):
@@ -67,8 +76,7 @@ class TestRedisGraphStore:
         redis = faredis.FakeRedis()
         store = RedisGraphStore(redis)
         assert await store.next_seq("r4") == 0
-        await store.append_patch("r4", {"seq": 0, "op": "x",
-                                         "node_id": "n", "ts": 0.0, "data": {}})
+        await store.append_patch("r4", {"seq": 0, "op": "x", "node_id": "n", "ts": 0.0, "data": {}})
         assert await store.next_seq("r4") == 1
 
     @pytest.mark.asyncio
@@ -76,8 +84,7 @@ class TestRedisGraphStore:
         redis = faredis.FakeRedis()
         store = RedisGraphStore(redis)
         await store.save_snapshot("r5", '{"run_id":"r5"}')
-        await store.append_patch("r5", {"seq": 0, "op": "x",
-                                         "node_id": "n", "ts": 0.0, "data": {}})
+        await store.append_patch("r5", {"seq": 0, "op": "x", "node_id": "n", "ts": 0.0, "data": {}})
         await store.delete("r5")
         assert await store.load_snapshot("r5") is None
         assert await store.load_patches("r5") == []
@@ -98,8 +105,9 @@ class TestRedisGraphStore:
         store = RedisGraphStore(redis)
         # Manually push corrupt data
         await redis.rpush("hfa:graph:patch:r7", b"NOT_JSON")
-        await redis.rpush("hfa:graph:patch:r7",
-                          json.dumps({"seq": 0, "op": "x",
-                                      "node_id": "n", "ts": 0.0, "data": {}}).encode())
+        await redis.rpush(
+            "hfa:graph:patch:r7",
+            json.dumps({"seq": 0, "op": "x", "node_id": "n", "ts": 0.0, "data": {}}).encode(),
+        )
         patches = await store.load_patches("r7")
-        assert len(patches) == 1   # corrupt entry skipped
+        assert len(patches) == 1  # corrupt entry skipped

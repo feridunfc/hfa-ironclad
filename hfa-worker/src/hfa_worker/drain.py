@@ -13,6 +13,7 @@ Sprint 12 additions:
   - idempotent: second call to start_drain is a no-op
   - completed vs timed-out path clearly logged and counted
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -53,7 +54,9 @@ class DrainManager:
     def is_draining(self) -> bool:
         return self._draining
 
-    async def start_drain(self, reason: str = "shutdown", timeout: float = 30.0) -> None:
+    async def start_drain(
+        self, reason: str = "shutdown", timeout: float = 30.0
+    ) -> None:
         if self._draining:
             logger.warning(
                 "Already draining, ignoring second drain request: worker=%s",
@@ -92,7 +95,8 @@ class DrainManager:
         if timed_out:
             logger.warning(
                 "Drain timeout: worker=%s inflight=%d remaining",
-                self._worker_id, self._consumer.inflight_count,
+                self._worker_id,
+                self._consumer.inflight_count,
             )
             if _M:
                 _M.worker_drain_timeout_total.inc()
@@ -109,9 +113,7 @@ class DrainManager:
             try:
                 owner = await self._redis.get(key)
                 if owner:
-                    owner_str = (
-                        owner.decode() if isinstance(owner, bytes) else owner
-                    )
+                    owner_str = owner.decode() if isinstance(owner, bytes) else owner
                     if owner_str == self._worker_group:
                         await self._redis.delete(key)
             except Exception as exc:

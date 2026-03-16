@@ -3,6 +3,7 @@ hfa-core/src/hfa/healing/circuit_breaker.py
 IRONCLAD Sprint 1 STUB — Full state-machine implemented in Sprint 4.
 This stub keeps Sprint 1 fully runnable without Sprint 4 code.
 """
+
 import logging
 import time
 from enum import Enum
@@ -51,7 +52,9 @@ class CircuitBreaker:
 
         logger.info(
             "CircuitBreaker(%s) initialised: threshold=%d, recovery=%ds",
-            name, failure_threshold, recovery_timeout,
+            name,
+            failure_threshold,
+            recovery_timeout,
         )
 
     def is_open(self) -> bool:
@@ -60,7 +63,9 @@ class CircuitBreaker:
             if self._state == CircuitState.OPEN:
                 if time.monotonic() - self._last_failure_time >= self.recovery_timeout:
                     self._state = CircuitState.HALF_OPEN
-                    logger.info("CircuitBreaker(%s) → HALF_OPEN (probe window)", self.name)
+                    logger.info(
+                        "CircuitBreaker(%s) → HALF_OPEN (probe window)", self.name
+                    )
                     return False
                 return True
             return False
@@ -83,7 +88,8 @@ class CircuitBreaker:
                 if self._state != CircuitState.OPEN:
                     logger.warning(
                         "CircuitBreaker(%s) → OPEN after %d failures",
-                        self.name, self._failure_count,
+                        self.name,
+                        self._failure_count,
                     )
                 self._state = CircuitState.OPEN
 

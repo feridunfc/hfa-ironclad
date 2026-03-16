@@ -17,6 +17,7 @@ IRONCLAD rules
 * close() not needed (no background tasks).
 * All load_* methods return None/[] and log on error — never raise.
 """
+
 from __future__ import annotations
 
 import abc
@@ -28,7 +29,6 @@ logger = logging.getLogger(__name__)
 
 
 class GraphStore(abc.ABC):
-
     @abc.abstractmethod
     async def save_snapshot(self, run_id: str, graph_json: str) -> None:
         """Persist full JSON snapshot (overwrite-safe, idempotent)."""
@@ -61,8 +61,7 @@ class GraphStore(abc.ABC):
 
 
 class RedisGraphStore(GraphStore):
-
-    SNAP_TTL  = 86_400
+    SNAP_TTL = 86_400
     PATCH_TTL = 86_400
 
     def __init__(self, redis) -> None:
@@ -100,15 +99,11 @@ class RedisGraphStore(GraphStore):
         self, run_id: str, after_seq: int = 0
     ) -> list[dict[str, Any]]:
         try:
-            raw_list = await self._redis.lrange(
-                f"hfa:graph:patch:{run_id}", 0, -1
-            )
+            raw_list = await self._redis.lrange(f"hfa:graph:patch:{run_id}", 0, -1)
             out: list[dict[str, Any]] = []
             for i, raw in enumerate(raw_list):
                 try:
-                    patch = json.loads(
-                        raw.decode() if isinstance(raw, bytes) else raw
-                    )
+                    patch = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
                     if patch.get("seq", 0) >= after_seq:
                         out.append(patch)
                 except json.JSONDecodeError:

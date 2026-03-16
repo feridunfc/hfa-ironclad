@@ -2,6 +2,7 @@
 hfa-tools/src/hfa_tools/services/coder_service.py
 IRONCLAD Sprint 3 — Code generation from PlanManifest.
 """
+
 from __future__ import annotations
 
 import logging
@@ -43,7 +44,7 @@ class CoderService:
         llm_client: RobustLLMClient,
         default_language: str = "python",
     ) -> None:
-        self._llm      = llm_client
+        self._llm = llm_client
         self._language = default_language
         logger.info("CoderService init: default_language=%s", default_language)
 
@@ -73,9 +74,7 @@ class CoderService:
         lang = language or self._language
         logger.info("Generating %s code for plan %s", lang, plan.plan_id)
 
-        system_prompt = _SYSTEM_PROMPTS.get(
-            lang, f"You are an expert {lang} developer."
-        )
+        system_prompt = _SYSTEM_PROMPTS.get(lang, f"You are an expert {lang} developer.")
         if framework:
             system_prompt += f" Use the {framework} framework."
 
@@ -106,7 +105,8 @@ class CoderService:
 
         logger.info(
             "Code generated: %d files, %d tokens",
-            len(change_set.changes), change_set.total_tokens,
+            len(change_set.changes),
+            change_set.total_tokens,
         )
         return change_set
 
@@ -121,11 +121,10 @@ class CoderService:
         framework: Optional[str],
     ) -> str:
         steps = "\n".join(
-            f"Step {i+1}: {s.get('description', str(s))}"
-            for i, s in enumerate(plan.steps)
+            f"Step {i + 1}: {s.get('description', str(s))}" for i, s in enumerate(plan.steps)
         )
         reqs = "\n".join(f"- {r}" for r in plan.requirements)
-        fw   = f"\nFramework: {framework}" if framework else ""
+        fw = f"\nFramework: {framework}" if framework else ""
         return (
             f"Plan: {plan.title}\n"
             f"Description: {plan.description}\n\n"
@@ -145,8 +144,8 @@ class CoderService:
         existing: CodeChangeSet,
     ) -> str:
         files = "\n".join(f"- {c.file_path}" for c in existing.changes)
-        reqs  = "\n".join(f"- {r}" for r in plan.requirements)
-        fw    = f"\nFramework: {framework}" if framework else ""
+        reqs = "\n".join(f"- {r}" for r in plan.requirements)
+        fw = f"\nFramework: {framework}" if framework else ""
         return (
             f"Plan: {plan.title}\n"
             f"Description: {plan.description}\n\n"
@@ -168,8 +167,12 @@ class CoderService:
             raise ValueError("CoderService: LLM returned empty change set")
 
         ext_map = {
-            "python": ".py", "javascript": ".js", "typescript": ".ts",
-            "go": ".go", "rust": ".rs", "java": ".java",
+            "python": ".py",
+            "javascript": ".js",
+            "typescript": ".ts",
+            "go": ".go",
+            "rust": ".rs",
+            "java": ".java",
         }
         expected = ext_map.get(language)
         if expected:
@@ -177,13 +180,12 @@ class CoderService:
                 if not c.file_path.endswith(expected):
                     logger.warning(
                         "File %s extension mismatch for language %s",
-                        c.file_path, language,
+                        c.file_path,
+                        language,
                     )
         for c in change_set.changes:
             if c.change_type == "modify" and not c.old_content_hash:
-                logger.warning(
-                    "Modification without old_content_hash: %s", c.file_path
-                )
+                logger.warning("Modification without old_content_hash: %s", c.file_path)
 
     async def close(self) -> None:
         await self._llm.close()

@@ -2,6 +2,7 @@
 hfa-worker/src/hfa_worker/models.py
 IRONCLAD Sprint 11 --- Worker Execution Models
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

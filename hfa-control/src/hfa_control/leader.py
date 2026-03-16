@@ -26,6 +26,7 @@ IRONCLAD rules
 * No asyncio.get_event_loop() — get_running_loop().
 * close() always safe (idempotent).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -33,24 +34,23 @@ import logging
 
 from typing import Optional
 
-from hfa.obs.tracing  import get_tracer   # type: ignore[attr-defined]
+from hfa.obs.tracing import get_tracer  # type: ignore[attr-defined]
 from hfa_control.exceptions import LeadershipError
 
-logger  = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 _tracer = get_tracer("hfa.leader")
 
 FENCE_KEY = "hfa:cp:fence"
 
 
 class LeaderElection:
-
     def __init__(self, redis, instance_id: str, config) -> None:
-        self._redis       = redis
+        self._redis = redis
         self._instance_id = instance_id
-        self._config      = config
-        self._is_leader   = False
-        self._fencing_token: int             = 0
-        self._task:          Optional[asyncio.Task] = None
+        self._config = config
+        self._is_leader = False
+        self._fencing_token: int = 0
+        self._task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
     # Public interface
@@ -128,16 +128,15 @@ class LeaderElection:
         ttl = self._config.leader_ttl
 
         # Atomic acquire attempt
-        acquired = await self._redis.set(
-            key, self._instance_id, nx=True, ex=ttl
-        )
+        acquired = await self._redis.set(key, self._instance_id, nx=True, ex=ttl)
 
         if acquired:
             if not self._is_leader:
                 self._fencing_token = await self._redis.incr(FENCE_KEY)
                 logger.info(
                     "LeaderElection: ACQUIRED leadership instance=%s token=%d",
-                    self._instance_id, self._fencing_token,
+                    self._instance_id,
+                    self._fencing_token,
                 )
             self._is_leader = True
             return
@@ -152,8 +151,7 @@ class LeaderElection:
         # Another instance holds leadership
         if self._is_leader:
             logger.warning(
-                "LeaderElection: LOST leadership instance=%s "
-                "current_leader=%s",
+                "LeaderElection: LOST leadership instance=%s current_leader=%s",
                 self._instance_id,
                 current.decode() if current else "unknown",
             )

@@ -29,6 +29,7 @@ Node lifecycle
   DONE      → completed successfully (commit_node called)
   FAILED    → failed (fail_node called)
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -47,16 +48,18 @@ logger = logging.getLogger(__name__)
 # Node status
 # ---------------------------------------------------------------------------
 
+
 class NodeStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
-    DONE    = "done"
-    FAILED  = "failed"
+    DONE = "done"
+    FAILED = "failed"
 
 
 # ---------------------------------------------------------------------------
 # GraphNode
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class GraphNode:
@@ -81,21 +84,22 @@ class GraphNode:
     error:          Error message if status == FAILED.
     metadata:       Arbitrary key-value metadata (schema version, model, etc.).
     """
-    node_id:     str
-    agent_type:  str
-    run_id:      str
-    tenant_id:   str
-    depth:       int               = 0
-    parent_ids:  List[str]        = field(default_factory=list)
-    status:      NodeStatus       = NodeStatus.PENDING
-    started_at:  Optional[float]  = None
-    finished_at: Optional[float]  = None
-    input_hash:  Optional[str]    = None
-    output_hash: Optional[str]    = None
-    tokens_used: int              = 0
-    cost_cents:  int              = 0     # ✅ integer cents
-    error:       Optional[str]    = None
-    metadata:    Dict[str, Any]   = field(default_factory=dict)
+
+    node_id: str
+    agent_type: str
+    run_id: str
+    tenant_id: str
+    depth: int = 0
+    parent_ids: List[str] = field(default_factory=list)
+    status: NodeStatus = NodeStatus.PENDING
+    started_at: Optional[float] = None
+    finished_at: Optional[float] = None
+    input_hash: Optional[str] = None
+    output_hash: Optional[str] = None
+    tokens_used: int = 0
+    cost_cents: int = 0  # ✅ integer cents
+    error: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def duration_ms(self) -> Optional[float]:
@@ -107,7 +111,7 @@ class GraphNode:
     def to_dict(self) -> Dict[str, Any]:
         """Serialise to plain dict (JSON-compatible)."""
         d = asdict(self)
-        d["status"]      = self.status.value
+        d["status"] = self.status.value
         d["duration_ms"] = self.duration_ms
         return d
 
@@ -116,6 +120,7 @@ class GraphNode:
 # Errors
 # ---------------------------------------------------------------------------
 
+
 class ExecutionGraphError(Exception):
     """Raised on invalid graph operations."""
 
@@ -123,6 +128,7 @@ class ExecutionGraphError(Exception):
 # ---------------------------------------------------------------------------
 # ExecutionGraph
 # ---------------------------------------------------------------------------
+
 
 class ExecutionGraph:
     """
@@ -151,12 +157,12 @@ class ExecutionGraph:
     """
 
     def __init__(self, run_id: str, tenant_id: str) -> None:
-        self.run_id    = run_id
+        self.run_id = run_id
         self.tenant_id = tenant_id
-        self._nodes:   Dict[str, GraphNode] = {}
-        self._edges:   Dict[str, Set[str]]  = {}   # node_id → set of child node_ids
-        self._lock     = asyncio.Lock()
-        self._seq      = 0
+        self._nodes: Dict[str, GraphNode] = {}
+        self._edges: Dict[str, Set[str]] = {}  # node_id → set of child node_ids
+        self._lock = asyncio.Lock()
+        self._seq = 0
         logger.debug("ExecutionGraph created: run=%s tenant=%s", run_id, tenant_id)
 
     # ------------------------------------------------------------------
@@ -165,10 +171,10 @@ class ExecutionGraph:
 
     def add_node(
         self,
-        agent_type:  str,
-        parent_ids:  Optional[List[str]] = None,
-        input_data:  Optional[Any] = None,
-        metadata:    Optional[Dict[str, Any]] = None,
+        agent_type: str,
+        parent_ids: Optional[List[str]] = None,
+        input_data: Optional[Any] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Add a new PENDING node to the graph.
@@ -215,14 +221,14 @@ class ExecutionGraph:
                 input_hash = None
 
         node = GraphNode(
-            node_id    = node_id,
-            agent_type = agent_type,
-            run_id     = self.run_id,
-            tenant_id  = self.tenant_id,
-            depth      = depth,
-            parent_ids = parents,
-            input_hash = input_hash,
-            metadata   = metadata or {},
+            node_id=node_id,
+            agent_type=agent_type,
+            run_id=self.run_id,
+            tenant_id=self.tenant_id,
+            depth=depth,
+            parent_ids=parents,
+            input_hash=input_hash,
+            metadata=metadata or {},
         )
         self._nodes[node_id] = node
 
@@ -232,7 +238,10 @@ class ExecutionGraph:
 
         logger.debug(
             "Graph.add_node: run=%s node=%s depth=%d parents=%s",
-            self.run_id, node_id, depth, parents,
+            self.run_id,
+            node_id,
+            depth,
+            parents,
         )
         return node_id
 
@@ -249,17 +258,17 @@ class ExecutionGraph:
                 raise ExecutionGraphError(
                     f"Cannot start node {node_id!r}: status={node.status.value}"
                 )
-            node.status     = NodeStatus.RUNNING
+            node.status = NodeStatus.RUNNING
             node.started_at = time.time()
         logger.debug("Graph.start_node: run=%s node=%s", self.run_id, node_id)
 
     async def commit_node(
         self,
-        node_id:     str,
-        tokens:      int = 0,
-        cost_cents:  int = 0,
-        output:      Optional[Any] = None,
-        metadata:    Optional[Dict[str, Any]] = None,
+        node_id: str,
+        tokens: int = 0,
+        cost_cents: int = 0,
+        output: Optional[Any] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Transition node from RUNNING → DONE.
@@ -280,10 +289,10 @@ class ExecutionGraph:
                 raise ExecutionGraphError(
                     f"Cannot commit node {node_id!r}: status={node.status.value}"
                 )
-            node.status      = NodeStatus.DONE
+            node.status = NodeStatus.DONE
             node.finished_at = time.time()
             node.tokens_used = tokens
-            node.cost_cents  = cost_cents
+            node.cost_cents = cost_cents
 
             if output is not None:
                 try:
@@ -297,14 +306,17 @@ class ExecutionGraph:
 
         logger.debug(
             "Graph.commit_node: run=%s node=%s tokens=%d cost=%d¢ duration=%.0fms",
-            self.run_id, node_id, tokens, cost_cents,
+            self.run_id,
+            node_id,
+            tokens,
+            cost_cents,
             (self._nodes[node_id].duration_ms or 0),
         )
 
     async def fail_node(
         self,
         node_id: str,
-        error:   str,
+        error: str,
     ) -> None:
         """
         Transition node from RUNNING → FAILED.
@@ -322,9 +334,9 @@ class ExecutionGraph:
                 raise ExecutionGraphError(
                     f"Cannot fail node {node_id!r}: status={node.status.value}"
                 )
-            node.status      = NodeStatus.FAILED
+            node.status = NodeStatus.FAILED
             node.finished_at = time.time()
-            node.error       = error
+            node.error = error
         logger.warning(
             "Graph.fail_node: run=%s node=%s error=%s", self.run_id, node_id, error
         )
@@ -348,11 +360,15 @@ class ExecutionGraph:
 
     def total_cost_cents(self) -> int:
         """Sum of cost_cents across all DONE nodes."""
-        return sum(n.cost_cents for n in self._nodes.values() if n.status == NodeStatus.DONE)
+        return sum(
+            n.cost_cents for n in self._nodes.values() if n.status == NodeStatus.DONE
+        )
 
     def total_tokens(self) -> int:
         """Sum of tokens_used across all DONE nodes."""
-        return sum(n.tokens_used for n in self._nodes.values() if n.status == NodeStatus.DONE)
+        return sum(
+            n.tokens_used for n in self._nodes.values() if n.status == NodeStatus.DONE
+        )
 
     def is_complete(self) -> bool:
         """True if all nodes are DONE or FAILED (none PENDING or RUNNING)."""
@@ -397,20 +413,20 @@ class ExecutionGraph:
             by_status[n.status] += 1
 
         return {
-            "run_id":   self.run_id,
+            "run_id": self.run_id,
             "tenant_id": self.tenant_id,
-            "nodes":    nodes,
-            "edges":    edges,
-            "summary":  {
-                "total_nodes":      len(nodes),
-                "done":             by_status[NodeStatus.DONE],
-                "failed":           by_status[NodeStatus.FAILED],
-                "running":          by_status[NodeStatus.RUNNING],
-                "pending":          by_status[NodeStatus.PENDING],
-                "total_tokens":     self.total_tokens(),
+            "nodes": nodes,
+            "edges": edges,
+            "summary": {
+                "total_nodes": len(nodes),
+                "done": by_status[NodeStatus.DONE],
+                "failed": by_status[NodeStatus.FAILED],
+                "running": by_status[NodeStatus.RUNNING],
+                "pending": by_status[NodeStatus.PENDING],
+                "total_tokens": self.total_tokens(),
                 "total_cost_cents": self.total_cost_cents(),
-                "is_complete":      self.is_complete(),
-                "has_failures":     self.has_failures(),
+                "is_complete": self.is_complete(),
+                "has_failures": self.has_failures(),
             },
         }
 

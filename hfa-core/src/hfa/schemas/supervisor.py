@@ -9,6 +9,7 @@ defined in agent.py with full policy detail needed for Sprint 2:
   * RoutingPolicy  — where to send the request post-validation
   * SupervisorPolicy — composite wrapper injected into every run
 """
+
 from __future__ import annotations
 
 import logging
@@ -24,9 +25,10 @@ logger = logging.getLogger(__name__)
 # Policy enums
 # ---------------------------------------------------------------------------
 
+
 class ComplianceAction(str, Enum):
     ALLOW = "allow"
-    HITL = "hitl"       # human-in-the-loop review required
+    HITL = "hitl"  # human-in-the-loop review required
     DENY = "deny"
 
 
@@ -40,6 +42,7 @@ class AlertSeverity(str, Enum):
 # BudgetPolicy
 # ---------------------------------------------------------------------------
 
+
 class BudgetPolicy(BaseModel):
     """
     Per-run token and cost budget limits.
@@ -47,6 +50,7 @@ class BudgetPolicy(BaseModel):
     All threshold fields are fractions of the limit (0.0–1.0).
     E.g. alert_at_fraction=0.8 → alert when 80 % of limit spent.
     """
+
     limit_usd: float = Field(
         ...,
         gt=0,
@@ -64,7 +68,7 @@ class BudgetPolicy(BaseModel):
         ge=0.0,
         le=1.0,
         description="Freeze run when spent/limit exceeds this fraction. "
-                    "Normally 1.0 (at exhaustion); set lower for safety margin.",
+        "Normally 1.0 (at exhaustion); set lower for safety margin.",
     )
     alert_severity: AlertSeverity = Field(
         default=AlertSeverity.WARNING,
@@ -74,15 +78,14 @@ class BudgetPolicy(BaseModel):
     @model_validator(mode="after")
     def alert_before_hard_stop(self) -> "BudgetPolicy":
         if self.alert_at_fraction > self.hard_stop_at_fraction:
-            raise ValueError(
-                "alert_at_fraction must be ≤ hard_stop_at_fraction"
-            )
+            raise ValueError("alert_at_fraction must be ≤ hard_stop_at_fraction")
         return self
 
 
 # ---------------------------------------------------------------------------
 # ComplianceRule
 # ---------------------------------------------------------------------------
+
 
 class ComplianceCondition(BaseModel):
     """
@@ -94,6 +97,7 @@ class ComplianceCondition(BaseModel):
                          "not_equals", "matches_regex".
     value:       Expected value (string for comparison, regex for matches_regex).
     """
+
     field_path: str = Field(..., min_length=1, max_length=200)
     operator: str = Field(
         ...,
@@ -117,6 +121,7 @@ class ComplianceRule(BaseModel):
         priority:    Evaluation order (1 = highest priority).
         enabled:     Disabled rules are skipped silently.
     """
+
     rule_id: str = Field(..., min_length=1, max_length=100)
     description: str = Field(..., min_length=10, max_length=500)
     action: ComplianceAction
@@ -133,6 +138,7 @@ class ComplianceRule(BaseModel):
 # RoutingPolicy
 # ---------------------------------------------------------------------------
 
+
 class RoutingPolicy(BaseModel):
     """
     Determines which agent receives the request after supervisor validation.
@@ -141,6 +147,7 @@ class RoutingPolicy(BaseModel):
     max_retries:      Max re-queuing attempts on transient failure.
     timeout_seconds:  Per-agent call timeout enforced by supervisor.
     """
+
     default_agent: str = Field(
         ...,
         pattern="^(architect|researcher|coder|tester|debugger|prompt_engineer)$",
@@ -157,6 +164,7 @@ class RoutingPolicy(BaseModel):
 # SupervisorPolicy — composite, injected into every run
 # ---------------------------------------------------------------------------
 
+
 class SupervisorPolicy(BaseModel):
     """
     Composite policy object injected by the supervisor middleware
@@ -172,6 +180,7 @@ class SupervisorPolicy(BaseModel):
         rules:       Ordered list of compliance rules.
         audit_trail: Whether to append each decision to the SignedLedger.
     """
+
     policy_id: str = Field(
         ...,
         min_length=3,
@@ -202,6 +211,7 @@ class SupervisorPolicy(BaseModel):
 # PolicyInjectionResult — returned by supervisor middleware
 # ---------------------------------------------------------------------------
 
+
 class PolicyInjectionResult(BaseModel):
     """
     Result of supervisor policy evaluation for a single request.
@@ -214,6 +224,7 @@ class PolicyInjectionResult(BaseModel):
         reasoning:     Human-readable explanation for audit.
         budget_state:  Serialised BudgetState snapshot at decision time.
     """
+
     action: ComplianceAction
     policy_id: str
     fired_rule_id: Optional[str] = None

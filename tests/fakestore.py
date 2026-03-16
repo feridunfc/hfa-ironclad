@@ -4,10 +4,9 @@ Minimal async in-memory Redis stub for Sprint 12 unit tests.
 Implements only the Redis commands used by StateStore, WorkerRegistry,
 RecoveryService, and DrainManager.
 """
+
 from __future__ import annotations
 
-import asyncio
-import json
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -17,12 +16,12 @@ class FakeRedis:
 
     def __init__(self):
         self._strings: Dict[str, Tuple[str, Optional[float]]] = {}  # key -> (value, expire_at)
-        self._hashes:  Dict[str, Dict[str, str]] = {}
-        self._sets:    Dict[str, set] = {}
-        self._zsets:   Dict[str, Dict[str, float]] = {}  # key -> {member: score}
+        self._hashes: Dict[str, Dict[str, str]] = {}
+        self._sets: Dict[str, set] = {}
+        self._zsets: Dict[str, Dict[str, float]] = {}  # key -> {member: score}
         self._streams: Dict[str, List[Tuple[str, Dict[bytes, bytes]]]] = {}
         self._stream_seq: Dict[str, int] = {}
-        self._groups:  Dict[str, Dict[str, Any]] = {}  # stream -> {group -> {consumer -> [ids]}}
+        self._groups: Dict[str, Dict[str, Any]] = {}  # stream -> {group -> {consumer -> [ids]}}
 
     # ------------------------------------------------------------------ #
     # Expiry helpers
@@ -100,8 +99,9 @@ class FakeRedis:
     # Hash commands
     # ------------------------------------------------------------------ #
 
-    async def hset(self, key: str, field: str = None, value: str = None,
-                   mapping: Dict = None) -> int:
+    async def hset(
+        self, key: str, field: str = None, value: str = None, mapping: Dict = None
+    ) -> int:
         if key not in self._hashes:
             self._hashes[key] = {}
         count = 0
@@ -179,8 +179,7 @@ class FakeRedis:
         z = self._zsets.get(key, {})
         return z.get(m)
 
-    async def zrange(self, key: str, start: int, stop: int,
-                     withscores: bool = False):
+    async def zrange(self, key: str, start: int, stop: int, withscores: bool = False):
         z = self._zsets.get(key, {})
         sorted_items = sorted(z.items(), key=lambda x: x[1])
         if stop < 0:
@@ -198,14 +197,24 @@ class FakeRedis:
 
     async def keys(self, pattern: str) -> List[bytes]:
         import fnmatch
-        all_keys = (list(self._strings.keys()) + list(self._hashes.keys()) +
-                    list(self._sets.keys()) + list(self._zsets.keys()))
+
+        all_keys = (
+            list(self._strings.keys())
+            + list(self._hashes.keys())
+            + list(self._sets.keys())
+            + list(self._zsets.keys())
+        )
         return [k.encode() for k in set(all_keys) if fnmatch.fnmatch(k, pattern)]
 
-    async def scan(self, cursor: int, match: str = '*', count: int = 100):
+    async def scan(self, cursor: int, match: str = "*", count: int = 100):
         import fnmatch
-        all_keys = (list(self._strings.keys()) + list(self._hashes.keys()) +
-                    list(self._sets.keys()) + list(self._zsets.keys()))
+
+        all_keys = (
+            list(self._strings.keys())
+            + list(self._hashes.keys())
+            + list(self._sets.keys())
+            + list(self._zsets.keys())
+        )
         matched = [k.encode() for k in set(all_keys) if fnmatch.fnmatch(k, match)]
         return 0, matched
 
@@ -219,19 +228,18 @@ class FakeRedis:
         self._stream_seq[stream] = seq
         return f"{ms}-{seq}"
 
-    async def xadd(self, stream: str, fields: Dict, maxlen=None,
-                   approximate=False) -> bytes:
+    async def xadd(self, stream: str, fields: Dict, maxlen=None, approximate=False) -> bytes:
         if stream not in self._streams:
             self._streams[stream] = []
         msg_id = self._next_stream_id(stream)
-        entry = {k.encode() if isinstance(k, str) else k:
-                 v.encode() if isinstance(v, str) else v
-                 for k, v in fields.items()}
+        entry = {
+            k.encode() if isinstance(k, str) else k: v.encode() if isinstance(v, str) else v
+            for k, v in fields.items()
+        }
         self._streams[stream].append((msg_id, entry))
         return msg_id.encode()
 
-    async def xrange(self, stream: str, min='-', max='+',
-                     count=None) -> List[Tuple]:
+    async def xrange(self, stream: str, min="-", max="+", count=None) -> List[Tuple]:
         entries = self._streams.get(stream, [])
         result = []
         for msg_id, data in entries:
@@ -243,27 +251,30 @@ class FakeRedis:
     async def xlen(self, stream: str) -> int:
         return len(self._streams.get(stream, []))
 
-    async def xgroup_create(self, name: str, groupname: str, id: str = '0',
-                            mkstream: bool = False) -> bool:
+    async def xgroup_create(
+        self, name: str, groupname: str, id: str = "0", mkstream: bool = False
+    ) -> bool:
         if mkstream and name not in self._streams:
             self._streams[name] = []
         key = f"{name}:{groupname}"
         if key in self._groups:
             raise Exception("BUSYGROUP Consumer Group name already exists")
-        self._groups[key] = {'last_id': id, 'pending': []}
+        self._groups[key] = {"last_id": id, "pending": []}
         return True
 
-    async def xreadgroup(self, groupname: str, consumername: str,
-                         streams: Dict, count: int = 10,
-                         block: int = None) -> List:
+    async def xreadgroup(
+        self, groupname: str, consumername: str, streams: Dict, count: int = 10, block: int = None
+    ) -> List:
         result = []
         for stream, start in streams.items():
             s = stream.decode() if isinstance(stream, bytes) else stream
             entries = self._streams.get(s, [])
             if not entries:
                 continue
-            msgs = [(msg_id.encode() if isinstance(msg_id, str) else msg_id, data)
-                    for msg_id, data in entries[-count:]]
+            msgs = [
+                (msg_id.encode() if isinstance(msg_id, str) else msg_id, data)
+                for msg_id, data in entries[-count:]
+            ]
             if msgs:
                 result.append((s.encode(), msgs))
         return result
@@ -271,11 +282,12 @@ class FakeRedis:
     async def xack(self, stream: str, group: str, *msg_ids) -> int:
         return len(msg_ids)
 
-    async def xpending_range(self, stream: str, group: str, min='-',
-                             max='+', count: int = 100) -> List:
+    async def xpending_range(
+        self, stream: str, group: str, min="-", max="+", count: int = 100
+    ) -> List:
         return []
 
-    async def xclaim(self, stream: str, group: str, consumer: str,
-                     min_idle_time: int, ids: List) -> List:
+    async def xclaim(
+        self, stream: str, group: str, consumer: str, min_idle_time: int, ids: List
+    ) -> List:
         return []
-

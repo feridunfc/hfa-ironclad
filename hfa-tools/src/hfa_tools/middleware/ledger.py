@@ -13,6 +13,7 @@ Design
 * Requires TenantMiddleware to run first (reads request.state.tenant).
 * Requires SignedLedger to be app.state.ledger (set at startup).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -42,6 +43,7 @@ _MAX_RESPONSE_SNIPPET_BYTES = 256
 # ---------------------------------------------------------------------------
 # LedgerMiddleware
 # ---------------------------------------------------------------------------
+
 
 class LedgerMiddleware(BaseHTTPMiddleware):
     """
@@ -82,7 +84,8 @@ class LedgerMiddleware(BaseHTTPMiddleware):
         self._event_type = event_type
         logger.info(
             "LedgerMiddleware initialised: event_type=%s skip_paths=%s",
-            event_type, self._skip,
+            event_type,
+            self._skip,
         )
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
@@ -110,16 +113,14 @@ class LedgerMiddleware(BaseHTTPMiddleware):
             status_code = response.status_code
         except Exception as exc:
             error_detail = f"{type(exc).__name__}: {exc}"
-            logger.error(
-                "Route handler raised: %s path=%s", error_detail, request.url.path
-            )
+            logger.error("Route handler raised: %s path=%s", error_detail, request.url.path)
             # Re-raise so FastAPI exception handlers can process it
             raise
         finally:
             duration_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
 
             # Fire-and-forget: never block client response
-            asyncio.get_running_loop().create_task(   # ✅ IRONCLAD: get_running_loop
+            asyncio.get_running_loop().create_task(  # ✅ IRONCLAD: get_running_loop
                 self._write_ledger_entry(
                     request=request,
                     status_code=status_code,
@@ -150,19 +151,16 @@ class LedgerMiddleware(BaseHTTPMiddleware):
             ledger = getattr(ledger, "ledger", None) if ledger else None
 
             if ledger is None:
-                logger.warning(
-                    "LedgerMiddleware: app.state.ledger not set — skipping ledger write"
-                )
+                logger.warning("LedgerMiddleware: app.state.ledger not set — skipping ledger write")
                 return
 
             # Extract tenant context (populated by TenantMiddleware)
-            tenant_ctx: Optional[TenantContext] = getattr(
-                request.state, "tenant", None
-            )
+            tenant_ctx: Optional[TenantContext] = getattr(request.state, "tenant", None)
             if tenant_ctx is None:
                 logger.debug(
                     "LedgerMiddleware: no TenantContext on request.state — "
-                    "skipping ledger write for path=%s", request.url.path,
+                    "skipping ledger write for path=%s",
+                    request.url.path,
                 )
                 return
 
@@ -187,14 +185,13 @@ class LedgerMiddleware(BaseHTTPMiddleware):
 
         except Exception as exc:
             # Ledger failure must NEVER affect the HTTP response
-            logger.error(
-                "LedgerMiddleware._write_ledger_entry failed: %s", exc, exc_info=True
-            )
+            logger.error("LedgerMiddleware._write_ledger_entry failed: %s", exc, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
 # Startup / shutdown helpers for app lifespan
 # ---------------------------------------------------------------------------
+
 
 async def setup_ledger(app, key_provider, store=None) -> None:
     """
@@ -217,9 +214,7 @@ async def setup_ledger(app, key_provider, store=None) -> None:
 
     ledger = SignedLedger(key_provider=key_provider, store=store)
     app.state.ledger = ledger
-    logger.info(
-        "SignedLedger attached to app.state: key_id=%s", key_provider.key_id
-    )
+    logger.info("SignedLedger attached to app.state: key_id=%s", key_provider.key_id)
 
 
 async def teardown_ledger(app) -> None:

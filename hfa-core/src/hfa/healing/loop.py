@@ -25,6 +25,7 @@ IRONCLAD rules enforced
 * Integer cents for cost tracking (total_cost_cents).
 * Callable signature: async (run_id: str, attempt: int) -> HealingResult
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -43,6 +44,7 @@ logger = logging.getLogger(__name__)
 # Result / Error types
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class HealingResult:
     """
@@ -56,12 +58,13 @@ class HealingResult:
         payload:         Arbitrary output from the callable.
         recovered:       True if at least one retry was needed.
     """
-    run_id:      str
-    attempts:    int
+
+    run_id: str
+    attempts: int
     tokens_used: int
-    cost_cents:  int
-    payload:     Any
-    recovered:   bool = False
+    cost_cents: int
+    payload: Any
+    recovered: bool = False
 
 
 class HealingError(Exception):
@@ -80,7 +83,7 @@ class HealingMaxRetriesError(HealingError):
             f"Max retries ({attempts}) exhausted for run {run_id}: {last_error}",
             run_id,
         )
-        self.attempts   = attempts
+        self.attempts = attempts
         self.last_error = last_error
 
 
@@ -100,6 +103,7 @@ class HealingCircuitOpenError(HealingError):
 # Attempt context passed to callable
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class AttemptContext:
     """
@@ -112,9 +116,10 @@ class AttemptContext:
         prior_error: Error message from previous attempt (None on first try).
         fingerprint: SHA-256 of prior error (None on first try).
     """
-    run_id:      str
-    tenant_id:   str
-    attempt:     int
+
+    run_id: str
+    tenant_id: str
+    attempt: int
     prior_error: Optional[str]
     fingerprint: Optional[str]
 
@@ -122,6 +127,7 @@ class AttemptContext:
 # ---------------------------------------------------------------------------
 # Token/cost update helper (passed back from callable)
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class AttemptOutcome:
@@ -133,9 +139,10 @@ class AttemptOutcome:
         tokens_used:  LLM tokens consumed in this attempt.
         cost_cents:   Cost in INTEGER CENTS for this attempt (not cumulative).
     """
-    payload:     Any
+
+    payload: Any
     tokens_used: int = 0
-    cost_cents:  int = 0   # ✅ integer cents — no float
+    cost_cents: int = 0  # ✅ integer cents — no float
 
 
 # Type alias for the healing callable
@@ -145,6 +152,7 @@ HealingCallable = Callable[[AttemptContext], Awaitable[AttemptOutcome]]
 # ---------------------------------------------------------------------------
 # SelfHealingEngine
 # ---------------------------------------------------------------------------
+
 
 class SelfHealingEngine:
     """
@@ -189,16 +197,17 @@ class SelfHealingEngine:
         max_backoff_seconds: float = 30.0,
         jitter: bool = True,
     ) -> None:
-        self._store              = store
-        self._max_attempts       = max_attempts
-        self._cooldown           = cooldown_seconds
-        self._base_backoff       = base_backoff_seconds
+        self._store = store
+        self._max_attempts = max_attempts
+        self._cooldown = cooldown_seconds
+        self._base_backoff = base_backoff_seconds
         self._backoff_multiplier = backoff_multiplier
-        self._max_backoff        = max_backoff_seconds
-        self._jitter             = jitter
+        self._max_backoff = max_backoff_seconds
+        self._jitter = jitter
         logger.info(
             "SelfHealingEngine created: max_attempts=%d cooldown=%.1fs",
-            max_attempts, cooldown_seconds,
+            max_attempts,
+            cooldown_seconds,
         )
 
     # ------------------------------------------------------------------
@@ -227,13 +236,15 @@ class SelfHealingEngine:
             HealingMaxRetriesError:  All attempts exhausted.
         """
         state_key = self._make_key(tenant_id, run_id)
-        state     = await self._load_or_create(state_key)
+        state = await self._load_or_create(state_key)
 
         # ── Circuit breaker check ────────────────────────────────────────
         if state.is_circuit_open():
             logger.warning(
                 "Circuit OPEN: tenant=%s run=%s open_until=%.0f",
-                tenant_id, run_id, state.circuit_open_until,
+                tenant_id,
+                run_id,
+                state.circuit_open_until,
             )
             raise HealingCircuitOpenError(run_id, state.circuit_open_until)
 
@@ -241,16 +252,19 @@ class SelfHealingEngine:
 
         while state.attempt < self._max_attempts:
             ctx = AttemptContext(
-                run_id      = run_id,
-                tenant_id   = tenant_id,
-                attempt     = state.attempt,
-                prior_error = state.last_error,
-                fingerprint = state.fingerprint,
+                run_id=run_id,
+                tenant_id=tenant_id,
+                attempt=state.attempt,
+                prior_error=state.last_error,
+                fingerprint=state.fingerprint,
             )
 
             logger.info(
                 "Healing attempt %d/%d: tenant=%s run=%s",
-                state.attempt + 1, self._max_attempts, tenant_id, run_id,
+                state.attempt + 1,
+                self._max_attempts,
+                tenant_id,
+                run_id,
             )
 
             try:
@@ -258,34 +272,41 @@ class SelfHealingEngine:
 
                 # ── SUCCESS ──────────────────────────────────────────────
                 result = HealingResult(
-                    run_id      = run_id,
-                    attempts    = state.attempt + 1,
-                    tokens_used = state.total_tokens_used + outcome.tokens_used,
-                    cost_cents  = state.total_cost_cents  + outcome.cost_cents,
-                    payload     = outcome.payload,
-                    recovered   = state.attempt > 0,
+                    run_id=run_id,
+                    attempts=state.attempt + 1,
+                    tokens_used=state.total_tokens_used + outcome.tokens_used,
+                    cost_cents=state.total_cost_cents + outcome.cost_cents,
+                    payload=outcome.payload,
+                    recovered=state.attempt > 0,
                 )
                 await self._store.delete(state_key)
                 logger.info(
                     "Healing SUCCESS: tenant=%s run=%s attempts=%d cost=%d¢",
-                    tenant_id, run_id, result.attempts, result.cost_cents,
+                    tenant_id,
+                    run_id,
+                    result.attempts,
+                    result.cost_cents,
                 )
                 return result
 
             except Exception as exc:
                 # ── FAILURE ──────────────────────────────────────────────
-                error_msg   = str(exc)
+                error_msg = str(exc)
                 fingerprint = self._fingerprint(error_msg)
 
                 logger.warning(
                     "Healing attempt %d FAILED: tenant=%s run=%s fp=%s error=%s",
-                    state.attempt + 1, tenant_id, run_id, fingerprint[:8], error_msg,
+                    state.attempt + 1,
+                    tenant_id,
+                    run_id,
+                    fingerprint[:8],
+                    error_msg,
                 )
 
-                state.attempt          += 1
-                state.last_error        = error_msg
-                state.fingerprint       = fingerprint
-                state.total_tokens_used += 0   # callable did not expose tokens on fail
+                state.attempt += 1
+                state.last_error = error_msg
+                state.fingerprint = fingerprint
+                state.total_tokens_used += 0  # callable did not expose tokens on fail
                 await self._store.set(state_key, state)
 
                 if state.attempt >= self._max_attempts:
@@ -294,15 +315,20 @@ class SelfHealingEngine:
                     await self._store.set(state_key, state)
                     logger.error(
                         "Healing EXHAUSTED: tenant=%s run=%s circuit open for %.0fs",
-                        tenant_id, run_id, self._cooldown,
+                        tenant_id,
+                        run_id,
+                        self._cooldown,
                     )
-                    raise HealingMaxRetriesError(run_id, state.attempt, error_msg) from exc
+                    raise HealingMaxRetriesError(
+                        run_id, state.attempt, error_msg
+                    ) from exc
 
                 # Back-off before next attempt
                 backoff = self._backoff(state.attempt)
                 logger.info(
                     "Healing back-off %.2fs before attempt %d",
-                    backoff, state.attempt + 1,
+                    backoff,
+                    state.attempt + 1,
                 )
                 await asyncio.sleep(backoff)
 
@@ -353,6 +379,7 @@ class SelfHealingEngine:
         With jitter: multiply by random in [0.5, 1.5].
         """
         import random
+
         delay = min(
             self._base_backoff * (self._backoff_multiplier ** (attempt - 1)),
             self._max_backoff,

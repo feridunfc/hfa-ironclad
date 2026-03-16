@@ -16,6 +16,7 @@ Sprint 12 additions:
   - _reclaim_pending_messages counts reclaimed messages
   - _process_message records execution duration
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -134,7 +135,9 @@ class WorkerConsumer:
                     except Exception as exc:
                         logger.warning(
                             "Claim renew failed: worker=%s run=%s error=%s",
-                            self._worker_id, run_id, exc,
+                            self._worker_id,
+                            run_id,
+                            exc,
                         )
                         if _M:
                             _M.claim_renew_failure_total.inc()
@@ -143,7 +146,8 @@ class WorkerConsumer:
                         _M.claim_renew_total.inc(renewed)
                     logger.debug(
                         "Claim renew: worker=%s renewed=%d",
-                        self._worker_id, renewed,
+                        self._worker_id,
+                        renewed,
                     )
             except asyncio.CancelledError:
                 break
@@ -201,7 +205,9 @@ class WorkerConsumer:
                     shard = int(stream.split(":")[-1])
                     logger.info(
                         "Reclaimed pending message: worker=%s stream=%s msg_id=%s",
-                        self._worker_id, stream, msg_id_str,
+                        self._worker_id,
+                        stream,
+                        msg_id_str,
                     )
                     total_reclaimed += 1
                     await self._process_message(msg_id_str, data, stream, shard)
@@ -337,9 +343,7 @@ class WorkerConsumer:
 
             except TerminalExecutionError as exc:
                 duration_ms = (time.monotonic() - exec_start) * 1000.0
-                logger.warning(
-                    "Terminal failure run=%s error=%s", event.run_id, exc
-                )
+                logger.warning("Terminal failure run=%s error=%s", event.run_id, exc)
                 await self._state.store_result(
                     event.run_id,
                     event.tenant_id,
@@ -379,7 +383,9 @@ class WorkerConsumer:
             except Exception as exc:
                 logger.error(
                     "Unexpected infra crash run=%s error=%s",
-                    event.run_id, exc, exc_info=True,
+                    event.run_id,
+                    exc,
+                    exc_info=True,
                 )
                 await self._state.release_claim(event.run_id)
                 if _M:

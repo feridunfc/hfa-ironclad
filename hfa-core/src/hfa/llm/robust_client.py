@@ -2,6 +2,7 @@
 hfa-core/src/hfa/llm/robust_client.py
 IRONCLAD — Robust client with retry, circuit breaker, and validation
 """
+
 import asyncio
 import logging
 from typing import Optional, Type, TypeVar
@@ -59,7 +60,11 @@ class RobustLLMClient:
 
     def _init_provider(self, provider: str):
         if provider == "openai":
-            return OpenAIProvider(model=self.default_model, timeout_seconds=self.request_timeout, max_retries=0)
+            return OpenAIProvider(
+                model=self.default_model,
+                timeout_seconds=self.request_timeout,
+                max_retries=0,
+            )
         raise ValueError(f"Unsupported provider: {provider}")
 
     def _get_circuit(self, model: str) -> CircuitBreaker:
@@ -116,12 +121,16 @@ class RobustLLMClient:
 
             except asyncio.TimeoutError as e:
                 last_exception = e
-                logger.warning(f"LLM timeout (attempt {attempt+1}/{self.max_retries+1})")
+                logger.warning(
+                    f"LLM timeout (attempt {attempt + 1}/{self.max_retries + 1})"
+                )
                 circuit.record_failure()
 
             except ValidationError as e:
                 last_exception = e
-                logger.warning(f"Validation failed (attempt {attempt+1}/{self.max_retries+1}): {e}")
+                logger.warning(
+                    f"Validation failed (attempt {attempt + 1}/{self.max_retries + 1}): {e}"
+                )
                 # do NOT record circuit failure for validation drift; it's not provider outage
                 if (not retry_on_validation) or (attempt == self.max_retries):
                     raise LLMValidationError(f"Response validation failed: {e}") from e
@@ -131,18 +140,21 @@ class RobustLLMClient:
 
             except Exception as e:
                 last_exception = e
-                logger.warning(f"LLM call failed (attempt {attempt+1}/{self.max_retries+1}): {e}")
+                logger.warning(
+                    f"LLM call failed (attempt {attempt + 1}/{self.max_retries + 1}): {e}"
+                )
                 circuit.record_failure()
 
             if attempt < self.max_retries:
-                delay = min(self.base_delay * (2 ** attempt), self.max_delay)
+                delay = min(self.base_delay * (2**attempt), self.max_delay)
                 logger.info(f"Retrying in {delay:.2f}s...")
                 await asyncio.sleep(delay)
 
         circuit.record_failure()
-        raise LLMCallError(f"All {self.max_retries+1} attempts failed. Last error: {last_exception}")
+        raise LLMCallError(
+            f"All {self.max_retries + 1} attempts failed. Last error: {last_exception}"
+        )
 
-    
     async def generate_text(
         self,
         prompt: str,
@@ -195,7 +207,8 @@ class RobustLLMClient:
                 last_exception = e
                 logger.warning(
                     "LLM text timeout (attempt %s/%s)",
-                    attempt + 1, self.max_retries + 1
+                    attempt + 1,
+                    self.max_retries + 1,
                 )
                 circuit.record_failure()
 
@@ -203,21 +216,24 @@ class RobustLLMClient:
                 last_exception = e
                 logger.warning(
                     "LLM text call failed (attempt %s/%s): %s",
-                    attempt + 1, self.max_retries + 1, e
+                    attempt + 1,
+                    self.max_retries + 1,
+                    e,
                 )
                 circuit.record_failure()
 
             if attempt < self.max_retries:
-                delay = min(self.base_delay * (2 ** attempt), self.max_delay)
+                delay = min(self.base_delay * (2**attempt), self.max_delay)
                 logger.info("Retrying in %.2fs...", delay)
                 await asyncio.sleep(delay)
 
         circuit.record_failure()
         raise LLMCallError(
-            f"All {self.max_retries+1} attempts failed. Last error: {last_exception}"
+            f"All {self.max_retries + 1} attempts failed. Last error: {last_exception}"
         )
 
+
 async def close(self):
-        if hasattr(self._provider, "close"):
-            await self._provider.close()
-        logger.info("RobustLLMClient closed")
+    if hasattr(self._provider, "close"):
+        await self._provider.close()
+    logger.info("RobustLLMClient closed")

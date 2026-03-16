@@ -2,6 +2,7 @@
 hfa-core/src/hfa/runtime/state_store.py
 IRONCLAD Sprint 11 --- State Management Helpers (FINAL)
 """
+
 from __future__ import annotations
 
 import json
@@ -126,7 +127,9 @@ class StateStore:
         shard: int,
     ) -> bool:
         if not await self.claim_execution(run_id, worker_id):
-            logger.warning("Failed to claim execution for run=%s (already claimed)", run_id)
+            logger.warning(
+                "Failed to claim execution for run=%s (already claimed)", run_id
+            )
             return False
 
         if await self.is_terminal(run_id):
@@ -146,7 +149,9 @@ class StateStore:
         await self.transition_state(run_id, "running")
         await self._redis.zadd(self.RUNNING_ZSET, {run_id: now})
 
-        logger.info("Run marked running: %s worker=%s shard=%d", run_id, worker_id, shard)
+        logger.info(
+            "Run marked running: %s worker=%s shard=%d", run_id, worker_id, shard
+        )
         return True
 
     async def mark_completed(self, run_id: str) -> None:
@@ -175,13 +180,17 @@ class StateStore:
                 run_id_raw, score = item
             else:
                 continue
-            run_id = run_id_raw.decode() if isinstance(run_id_raw, bytes) else run_id_raw
+            run_id = (
+                run_id_raw.decode() if isinstance(run_id_raw, bytes) else run_id_raw
+            )
             state = await self.get_run_state(run_id)
-            result.append({
-                "run_id": run_id,
-                "started_at": float(score),
-                "state": state or "unknown",
-            })
+            result.append(
+                {
+                    "run_id": run_id,
+                    "started_at": float(score),
+                    "state": state or "unknown",
+                }
+            )
         return result
 
     async def get_claim_owner(self, run_id: str) -> str | None:

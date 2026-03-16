@@ -26,6 +26,7 @@ IRONCLAD rules
 * close() always safe.
 * cost_cents: int — never float USD.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -34,10 +35,10 @@ import time
 from typing import List, Optional
 
 from hfa.events.schema import RunAdmittedEvent, RunScheduledEvent, RunRequestedEvent
-from hfa.events.codec  import serialize_event
-from hfa_control.models     import WorkerProfile, ControlPlaneConfig
-from hfa_control.registry   import WorkerRegistry
-from hfa_control.shard      import ShardOwnershipManager
+from hfa.events.codec import serialize_event
+from hfa_control.models import WorkerProfile, ControlPlaneConfig
+from hfa_control.registry import WorkerRegistry
+from hfa_control.shard import ShardOwnershipManager
 from hfa_control.exceptions import PlacementError
 
 try:
@@ -47,6 +48,7 @@ except Exception:
 
 try:
     from hfa.obs.tracing import get_tracer  # type: ignore
+
     _tracer = get_tracer("hfa.scheduler")
 except Exception:
     _tracer = None
@@ -57,20 +59,19 @@ _GROUP = "hfa-cp-scheduler"
 
 
 class Scheduler:
-
     def __init__(
         self,
         redis,
         registry: WorkerRegistry,
-        shards:   ShardOwnershipManager,
-        config:   ControlPlaneConfig,
+        shards: ShardOwnershipManager,
+        config: ControlPlaneConfig,
     ) -> None:
-        self._redis    = redis
+        self._redis = redis
         self._registry = registry
-        self._shards   = shards
-        self._config   = config
-        self._task:    Optional[asyncio.Task] = None
-        self._rr_counter = 0   # round-robin state
+        self._shards = shards
+        self._config = config
+        self._task: Optional[asyncio.Task] = None
+        self._rr_counter = 0  # round-robin state
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -119,7 +120,7 @@ class Scheduler:
                     count=20,
                     block=2000,
                 )
-                for _stream, entries in (msgs or []):
+                for _stream, entries in msgs or []:
                     for msg_id, data in entries:
                         et = (data.get(b"event_type") or b"").decode()
                         if et == "RunAdmitted":
@@ -151,9 +152,7 @@ class Scheduler:
                     if et == "RunAdmitted":
                         evt = RunAdmittedEvent.from_redis(data)
                         await self._schedule(evt)
-                    await self._redis.xack(
-                        self._config.control_stream, _GROUP, msg_id
-                    )
+                    await self._redis.xack(self._config.control_stream, _GROUP, msg_id)
         except Exception as exc:
             logger.debug("Scheduler._autoclaim skipped: %s", exc)
 
@@ -164,31 +163,30 @@ class Scheduler:
     async def _schedule(self, event: RunAdmittedEvent) -> None:
         span = (
             _tracer.start_as_current_span("hfa.scheduler.place")
-            if _tracer else _noop_span()
+            if _tracer
+            else _noop_span()
         )
         with span as sp:
-            _set_attr(sp, "hfa.run_id",    event.run_id)
+            _set_attr(sp, "hfa.run_id", event.run_id)
             _set_attr(sp, "hfa.tenant_id", event.tenant_id)
 
             try:
-                policy       = event.preferred_placement or "LEAST_LOADED"
+                policy = event.preferred_placement or "LEAST_LOADED"
                 worker_group = await self._select_worker_group(event, policy)
-                shard        = await self._shards.shard_for_group(
-                    worker_group, event.run_id
-                )
+                shard = await self._shards.shard_for_group(worker_group, event.run_id)
                 stream = f"hfa:stream:runs:{shard}"
 
                 # Write run metadata
                 await self._redis.hset(
                     f"hfa:run:meta:{event.run_id}",
                     mapping={
-                        "run_id":           event.run_id,
-                        "tenant_id":        event.tenant_id,
-                        "agent_type":       event.agent_type,
-                        "worker_group":     worker_group,
-                        "shard":            str(shard),
+                        "run_id": event.run_id,
+                        "tenant_id": event.tenant_id,
+                        "agent_type": event.agent_type,
+                        "worker_group": worker_group,
+                        "shard": str(shard),
                         "reschedule_count": "0",
-                        "admitted_at":      str(event.admitted_at),
+                        "admitted_at": str(event.admitted_at),
                     },
                 )
                 await self._redis.expire(f"hfa:run:meta:{event.run_id}", 86400)
@@ -237,17 +235,18 @@ class Scheduler:
                 )
 
                 _set_attr(sp, "hfa.worker_group", worker_group)
-                _set_attr(sp, "hfa.shard",        str(shard))
-                _set_attr(sp, "hfa.policy",        policy)
+                _set_attr(sp, "hfa.shard", str(shard))
+                _set_attr(sp, "hfa.policy", policy)
                 logger.info(
                     "Scheduled: run=%s group=%s shard=%d policy=%s",
-                    event.run_id, worker_group, shard, policy,
+                    event.run_id,
+                    worker_group,
+                    shard,
+                    policy,
                 )
 
             except PlacementError as exc:
-                logger.error(
-                    "PlacementError: run=%s %s", event.run_id, exc
-                )
+                logger.error("PlacementError: run=%s %s", event.run_id, exc)
                 if _M:
                     _M.scheduling_failures_total.inc()
                 await self._redis.set(
@@ -256,23 +255,23 @@ class Scheduler:
             except Exception as exc:
                 logger.error(
                     "Scheduler._schedule error: run=%s %s",
-                    event.run_id, exc, exc_info=True,
+                    event.run_id,
+                    exc,
+                    exc_info=True,
                 )
 
     # ------------------------------------------------------------------
     # Policy implementations
     # ------------------------------------------------------------------
 
-    async def _select_worker_group(
-        self, event: RunAdmittedEvent, policy: str
-    ) -> str:
+    async def _select_worker_group(self, event: RunAdmittedEvent, policy: str) -> str:
         if _M:
             _M.scheduling_attempts_total.inc()
 
-        region   = event.preferred_region or self._config.region
+        region = event.preferred_region or self._config.region
 
         # Use schedulable (non-draining) workers only.
-        workers  = await self._registry.list_schedulable_workers(region=region)
+        workers = await self._registry.list_schedulable_workers(region=region)
         if not workers:
             workers = await self._registry.list_schedulable_workers(region=None)
 
@@ -311,13 +310,12 @@ class Scheduler:
     ) -> str:
         """Prefer workers in preferred_region, fall back to LEAST_LOADED."""
         preferred = [
-            w for w in workers
+            w
+            for w in workers
             if w.region == (event.preferred_region or self._config.region)
             and w.available_slots > 0
         ]
-        pool = preferred if preferred else [
-            w for w in workers if w.available_slots > 0
-        ]
+        pool = preferred if preferred else [w for w in workers if w.available_slots > 0]
         if not pool:
             raise PlacementError("No workers with available slots")
         return min(pool, key=lambda w: w.load_factor).worker_group
@@ -328,7 +326,7 @@ class Scheduler:
         if not available:
             raise PlacementError("No workers with available slots (round-robin)")
         # Deduplicate groups preserving insertion order
-        seen:   list[str] = []
+        seen: list[str] = []
         groups: list[WorkerProfile] = []
         for w in available:
             if w.worker_group not in seen:
@@ -346,12 +344,11 @@ class Scheduler:
         Fall back to LEAST_LOADED if no capable workers found.
         """
         capable = [
-            w for w in workers
+            w
+            for w in workers
             if event.agent_type in w.capabilities and w.available_slots > 0
         ]
-        pool = capable if capable else [
-            w for w in workers if w.available_slots > 0
-        ]
+        pool = capable if capable else [w for w in workers if w.available_slots > 0]
         if not pool:
             raise PlacementError("No capable workers with available slots")
         return min(pool, key=lambda w: w.load_factor).worker_group
@@ -359,8 +356,12 @@ class Scheduler:
 
 def _noop_span():
     class _S:
-        def __enter__(self): return self
-        def __exit__(self, *_): pass
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
     return _S()
 
 

@@ -22,20 +22,24 @@ Coverage
   ✔ RunRequestedEvent forwarded to correct shard stream
   ✔ XAUTOCLAIM recovery re-processes admitted events
 """
+
 from __future__ import annotations
 
 import pytest
 import fakeredis.aioredis as faredis
 from unittest.mock import AsyncMock
 
-from hfa.events.schema       import RunAdmittedEvent
-from hfa_control.scheduler   import Scheduler
-from hfa_control.models      import (
-    WorkerProfile, WorkerStatus, ControlPlaneConfig,
+from hfa.events.schema import RunAdmittedEvent
+from hfa_control.scheduler import Scheduler
+from hfa_control.models import (
+    WorkerProfile,
+    WorkerStatus,
+    ControlPlaneConfig,
 )
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
+
 
 def _cfg(**kw) -> ControlPlaneConfig:
     data = {
@@ -49,24 +53,37 @@ def _cfg(**kw) -> ControlPlaneConfig:
 
 
 def _worker(
-    wid="w0", group="grp-a", region="us-east-1",
-    capacity=10, inflight=0, caps=None,
+    wid="w0",
+    group="grp-a",
+    region="us-east-1",
+    capacity=10,
+    inflight=0,
+    caps=None,
 ) -> WorkerProfile:
     return WorkerProfile(
-        worker_id=wid, worker_group=group, region=region,
-        capacity=capacity, inflight=inflight,
+        worker_id=wid,
+        worker_group=group,
+        region=region,
+        capacity=capacity,
+        inflight=inflight,
         status=WorkerStatus.HEALTHY,
         capabilities=caps or [],
     )
 
 
 def _event(
-    run_id="run-001", tenant_id="acme", agent_type="coder",
-    policy="LEAST_LOADED", region="",
+    run_id="run-001",
+    tenant_id="acme",
+    agent_type="coder",
+    policy="LEAST_LOADED",
+    region="",
 ) -> RunAdmittedEvent:
     return RunAdmittedEvent(
-        run_id=run_id, tenant_id=tenant_id, agent_type=agent_type,
-        preferred_placement=policy, preferred_region=region,
+        run_id=run_id,
+        tenant_id=tenant_id,
+        agent_type=agent_type,
+        preferred_placement=policy,
+        preferred_region=region,
     )
 
 
@@ -84,8 +101,8 @@ async def _make_sched(redis, workers, shard=4, schedulable_workers=None) -> Sche
 
 # ── Test class ────────────────────────────────────────────────────────────────
 
-class TestSchedulerPlacement:
 
+class TestSchedulerPlacement:
     @pytest.mark.asyncio
     async def test_least_loaded_selects_min_load(self):
         redis = faredis.FakeRedis()
@@ -95,7 +112,7 @@ class TestSchedulerPlacement:
             _worker("w2", "grp-c", inflight=5, capacity=10),  # 0.50
         ]
         sched = await _make_sched(redis, workers, shard=3)
-        evt   = _event(policy="LEAST_LOADED")
+        evt = _event(policy="LEAST_LOADED")
         await sched._schedule(evt)
 
         # grp-b owns shard=3 in our mock; verify shard_for_group was called with grp-b
@@ -109,7 +126,7 @@ class TestSchedulerPlacement:
             _worker("w1", "grp-b", inflight=10, capacity=10),
         ]
         sched = await _make_sched(redis, workers)
-        evt   = _event()
+        evt = _event()
         await sched._schedule(evt)
 
         state = await redis.get(f"hfa:run:state:{evt.run_id}")
@@ -129,7 +146,7 @@ class TestSchedulerPlacement:
         )
         shards = AsyncMock()
         shards.shard_for_group = AsyncMock(return_value=7)
-        sched  = Scheduler(redis, registry, shards, _cfg(region="eu-west-1"))
+        sched = Scheduler(redis, registry, shards, _cfg(region="eu-west-1"))
 
         evt = _event(policy="REGION_AFFINITY", region="eu-west-1")
         group = sched._policy_region_affinity([eu_worker, us_worker], evt)
@@ -156,9 +173,9 @@ class TestSchedulerPlacement:
 
     @pytest.mark.asyncio
     async def test_capability_match_prefers_capable_worker(self):
-        capable   = _worker("w0", "gpu-grp", caps=["python", "gpu"], inflight=0)
-        incapable = _worker("w1", "cpu-grp", caps=["python"],         inflight=0)
-        evt   = _event(agent_type="gpu_coder")
+        capable = _worker("w0", "gpu-grp", caps=["python", "gpu"], inflight=0)
+        incapable = _worker("w1", "cpu-grp", caps=["python"], inflight=0)
+        evt = _event(agent_type="gpu_coder")
         sched = Scheduler(None, AsyncMock(), AsyncMock(), _cfg())
         group = sched._policy_capability_match([capable, incapable], evt)
         # No exact match → falls back to least loaded (incapable is eligible)
@@ -172,7 +189,7 @@ class TestSchedulerPlacement:
     async def test_run_state_set_to_scheduled(self):
         redis = faredis.FakeRedis()
         sched = await _make_sched(redis, [_worker()])
-        evt   = _event(run_id="run-sched-001")
+        evt = _event(run_id="run-sched-001")
         await sched._schedule(evt)
         state = await redis.get("hfa:run:state:run-sched-001")
         assert state.decode() == "scheduled"
@@ -181,7 +198,7 @@ class TestSchedulerPlacement:
     async def test_run_meta_written(self):
         redis = faredis.FakeRedis()
         sched = await _make_sched(redis, [_worker("w0", "grp-a")])
-        evt   = _event(run_id="run-meta-001", tenant_id="acme")
+        evt = _event(run_id="run-meta-001", tenant_id="acme")
         await sched._schedule(evt)
         meta = await redis.hgetall("hfa:run:meta:run-meta-001")
         assert meta[b"tenant_id"] == b"acme"
@@ -193,10 +210,7 @@ class TestSchedulerPlacement:
         sched = await _make_sched(redis, [_worker()])
         await sched._schedule(_event(run_id="run-sev-001"))
         msgs = await redis.xrange("hfa:stream:control")
-        event_types = [
-            m[1].get(b"event_type", b"").decode()
-            for m in msgs
-        ]
+        event_types = [m[1].get(b"event_type", b"").decode() for m in msgs]
         assert "RunScheduled" in event_types
 
     @pytest.mark.asyncio
@@ -210,10 +224,10 @@ class TestSchedulerPlacement:
 
     @pytest.mark.asyncio
     async def test_placement_error_when_no_healthy_workers(self):
-        redis    = faredis.FakeRedis()
+        redis = faredis.FakeRedis()
         registry = AsyncMock()
         registry.list_healthy_workers = AsyncMock(return_value=[])
-        sched    = Scheduler(redis, registry, AsyncMock(), _cfg())
+        sched = Scheduler(redis, registry, AsyncMock(), _cfg())
         await sched._schedule(_event(run_id="run-fail-001"))
         state = await redis.get("hfa:run:state:run-fail-001")
         assert state.decode() == "failed"

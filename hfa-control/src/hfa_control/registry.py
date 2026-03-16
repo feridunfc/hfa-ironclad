@@ -25,6 +25,7 @@ IRONCLAD rules
 * No asyncio.get_event_loop() — get_running_loop().
 * close() always safe.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -36,25 +37,25 @@ from typing import List, Optional
 from hfa.events.schema import WorkerHeartbeatEvent, WorkerDrainingEvent
 
 try:
-    from hfa.obs.tracing  import get_tracer  # type: ignore[attr-defined]
+    from hfa.obs.tracing import get_tracer  # type: ignore[attr-defined]
+
     _tracer = get_tracer("hfa.registry")
 except Exception:
     _tracer = None  # graceful no-op if OTel not configured
 
-from hfa_control.models     import WorkerProfile, WorkerStatus, ControlPlaneConfig
+from hfa_control.models import WorkerProfile, WorkerStatus, ControlPlaneConfig
 from hfa_control.exceptions import WorkerNotFoundError
 
 logger = logging.getLogger(__name__)
 
-_GROUP    = "hfa-cp-registry"
+_GROUP = "hfa-cp-registry"
 
 
 class WorkerRegistry:
-
     def __init__(self, redis, config: ControlPlaneConfig) -> None:
-        self._redis  = redis
+        self._redis = redis
         self._config = config
-        self._task:  Optional[asyncio.Task] = None
+        self._task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -91,14 +92,12 @@ class WorkerRegistry:
         If region is None, returns workers across all regions.
         """
         if region:
-            raw_ids = await self._redis.smembers(
-                f"hfa:cp:workers:by_region:{region}"
-            )
+            raw_ids = await self._redis.smembers(f"hfa:cp:workers:by_region:{region}")
         else:
             keys = await self._redis.keys("hfa:cp:worker:*")
             raw_ids = {k.decode().split(":", 3)[3].encode() for k in keys}
 
-        now      = time.time()
+        now = time.time()
         profiles = []
         for wid_b in raw_ids:
             wid = wid_b.decode() if isinstance(wid_b, bytes) else wid_b
@@ -130,7 +129,8 @@ class WorkerRegistry:
         """
         all_workers = await self.list_healthy_workers(region=region)
         return [
-            w for w in all_workers
+            w
+            for w in all_workers
             if w.status == WorkerStatus.HEALTHY
             and not w.is_draining
             and w.available_slots > 0
@@ -185,7 +185,7 @@ class WorkerRegistry:
                     count=100,
                     block=2000,
                 )
-                for _stream, entries in (msgs or []):
+                for _stream, entries in msgs or []:
                     for msg_id, data in entries:
                         await self._handle(data)
                         await self._redis.xack(
@@ -236,14 +236,14 @@ class WorkerRegistry:
         # We reconstruct it from the Redis hash after writing, so we preserve the
         # value if already set (e.g. by a prior WorkerDrainingEvent).
         mapping = {
-            "worker_id":    event.worker_id,
+            "worker_id": event.worker_id,
             "worker_group": event.worker_group,
-            "region":       event.region,
-            "shards":       json.dumps(event.shards),
-            "capacity":     str(event.capacity),
-            "inflight":     str(event.inflight),
-            "last_seen":    str(event.timestamp),
-            "version":      event.version,
+            "region": event.region,
+            "shards": json.dumps(event.shards),
+            "capacity": str(event.capacity),
+            "inflight": str(event.inflight),
+            "last_seen": str(event.timestamp),
+            "version": event.version,
             "capabilities": json.dumps(event.capabilities),
         }
         # Preserve DRAINING status if already set; otherwise mark HEALTHY.
@@ -263,7 +263,10 @@ class WorkerRegistry:
         )
         logger.debug(
             "Heartbeat: worker=%s inflight=%d/%d region=%s status=%s",
-            event.worker_id, event.inflight, event.capacity, event.region,
+            event.worker_id,
+            event.inflight,
+            event.capacity,
+            event.region,
             mapping["status"],
         )
 
@@ -273,5 +276,7 @@ class WorkerRegistry:
         await self._redis.expire(key, self._config.registry_ttl)
         logger.info(
             "Worker DRAINING: %s deadline=%s reason=%s",
-            event.worker_id, event.drain_deadline_utc, event.reason,
+            event.worker_id,
+            event.drain_deadline_utc,
+            event.reason,
         )
