@@ -1,25 +1,40 @@
 """
 hfa-control/src/hfa_control/api/router.py
-IRONCLAD Sprint 10 — Control Plane REST API
+IRONCLAD Sprint 10 / Sprint 13 — Control Plane REST API
+
+Sprint 10 endpoints preserved unchanged.
+Sprint 13 adds operational endpoints for health, workers, runs, and recovery.
 
 Endpoints
 ---------
+Sprint 10 (preserved):
   GET  /control/v1/workers
   GET  /control/v1/workers/{worker_id}
-  POST /control/v1/workers/{worker_id}/drain      [operator]
+  POST /control/v1/workers/{worker_id}/drain
   GET  /control/v1/shards
   GET  /control/v1/runs/{run_id}/placement
-  POST /control/v1/runs/{run_id}/reschedule       [operator]
+  POST /control/v1/runs/{run_id}/reschedule
   GET  /control/v1/dlq
-  POST /control/v1/dlq/{run_id}/replay            [operator]
-  DELETE /control/v1/dlq/{run_id}                 [operator]
+  POST /control/v1/dlq/{run_id}/replay
+  DELETE /control/v1/dlq/{run_id}
   GET  /control/v1/health
+  GET  /control/v1/healthz          (Sprint 12)
+  GET  /control/v1/readyz           (Sprint 12)
+  GET  /control/v1/diagnostics/running  (Sprint 12)
+  GET  /control/v1/diagnostics/recovery (Sprint 12)
 
-Auth
-----
-  All endpoints require X-Tenant-ID for tenant isolation.
-  Operator endpoints additionally require X-CP-Auth: <secret>.
-  CP_AUTH_SECRET env var sets the accepted secret.
+Sprint 13 (new):
+  GET  /control/v1/health/live
+  GET  /control/v1/health/ready
+  GET  /control/v1/workers/healthy
+  GET  /control/v1/workers/schedulable
+  GET  /control/v1/runs/running
+  GET  /control/v1/runs/{run_id}/state
+  GET  /control/v1/runs/{run_id}/claim
+  GET  /control/v1/runs/{run_id}/result
+  GET  /control/v1/recovery/stale
+  GET  /control/v1/recovery/dlq
+  GET  /control/v1/recovery/summary
 
 IRONCLAD rules
 --------------
@@ -34,6 +49,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List
 
 from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from hfa.events.schema   import WorkerDrainingEvent
 from hfa.events.codec    import serialize_event
@@ -44,6 +60,13 @@ from hfa_control.exceptions import (
 from hfa_control.api.models import (
     WorkerResponse, ShardResponse, PlacementResponse,
     DLQEntryResponse, HealthResponse,
+    # Sprint 13 models
+    LiveResponse, ReadyResponse, ReadyCheckDetail,
+    WorkerSummary, WorkerListResponse,
+    RunStateResponse, RunClaimResponse, RunResultResponse,
+    RunningRunSummary, RunningRunsResponse,
+    StaleRunSummary, StaleRunsResponse,
+    RecoverySummaryResponse, DLQListResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,7 +87,7 @@ def _tenant_header(x_tenant_id: str) -> str:
 
 
 # ------------------------------------------------------------------
-# Workers
+# Sprint 10 — Workers (preserved)
 # ------------------------------------------------------------------
 
 @router.get("/workers", response_model=List[WorkerResponse])
@@ -75,7 +98,6 @@ async def list_workers(
     _tenant_header(x_tenant_id)
     registry = request.app.state.cp.registry
     workers  = await registry.list_healthy_workers()
-    # Also fetch all — healthy filter done client-side for full picture
     return [_worker_resp(w) for w in workers]
 
 
@@ -127,7 +149,7 @@ async def drain_worker(
 
 
 # ------------------------------------------------------------------
-# Shards
+# Sprint 10 — Shards (preserved)
 # ------------------------------------------------------------------
 
 @router.get("/shards", response_model=List[ShardResponse])
@@ -154,7 +176,7 @@ async def list_shards(
 
 
 # ------------------------------------------------------------------
-# Run placement
+# Sprint 10 — Run placement (preserved)
 # ------------------------------------------------------------------
 
 @router.get("/runs/{run_id}/placement", response_model=PlacementResponse)
@@ -177,7 +199,9 @@ async def get_placement(
         raise HTTPException(status_code=403, detail="Tenant mismatch")
 
     state_raw = await redis.get(f"hfa:run:state:{run_id}")
-    state = (state_raw.decode() if isinstance(state_raw, bytes) else state_raw) or "unknown"
+    state = (
+        state_raw.decode() if isinstance(state_raw, bytes) else state_raw
+    ) or "unknown"
 
     return PlacementResponse(
         run_id=run_id,
@@ -218,13 +242,12 @@ async def force_reschedule(
     if _s("tenant_id") != x_tenant_id:
         raise HTTPException(status_code=403, detail="Tenant mismatch")
 
-    # Use recovery service to handle the reschedule / DLQ logic
     result = await recovery._handle_stale(run_id)
     return {"run_id": run_id, "result": result}
 
 
 # ------------------------------------------------------------------
-# DLQ
+# Sprint 10 — DLQ (preserved)
 # ------------------------------------------------------------------
 
 @router.get("/dlq", response_model=List[DLQEntryResponse])
@@ -243,8 +266,8 @@ async def list_dlq(
             reason=e["reason"],
             delivery_count=e["reschedule_count"],
             dead_lettered_at=e["dead_lettered_at"],
-            original_error="",
-            cost_cents=0,
+            original_error=e.get("original_error", ""),
+            cost_cents=e.get("cost_cents", 0),
         )
         for e in entries
     ]
@@ -294,7 +317,7 @@ async def delete_dlq(
 
 
 # ------------------------------------------------------------------
-# Health (existing endpoint preserved)
+# Sprint 10 — Health (preserved)
 # ------------------------------------------------------------------
 
 @router.get("/health", response_model=HealthResponse)
@@ -328,46 +351,35 @@ async def health(request: Request) -> HealthResponse:
 
 
 # ------------------------------------------------------------------
-# Sprint 12 — operational endpoints
+# Sprint 12 probes (preserved)
 # ------------------------------------------------------------------
 
 @router.get("/healthz")
 async def healthz() -> dict:
-    """Liveness probe — returns 200 if the process is alive."""
     return {"status": "ok"}
 
 
 @router.get("/readyz")
 async def readyz(request: Request) -> dict:
-    """
-    Readiness probe — returns 200 when Redis is reachable and
-    at least one worker is registered.
-    Returns 503 when not ready.
-    """
-    from fastapi.responses import JSONResponse
-
     redis = request.app.state.redis
     cp    = request.app.state.cp
-
     checks: dict = {}
-
-    # Redis ping
     try:
         await redis.ping()
         checks["redis"] = "ok"
     except Exception as exc:
         checks["redis"] = f"error: {exc}"
-
-    # Worker registry
     try:
         reg_size = await cp.registry.registry_size()
         checks["registry"] = f"size={reg_size}"
     except Exception as exc:
         checks["registry"] = f"error: {exc}"
-
     ready = checks["redis"] == "ok"
     if not ready:
-        return JSONResponse(status_code=503, content={"status": "not_ready", "checks": checks})
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "checks": checks},
+        )
     return {"status": "ready", "checks": checks}
 
 
@@ -377,13 +389,8 @@ async def diagnostics_running(
     x_tenant_id: str = Header(...),
     x_cp_auth:   str = Header(default=""),
 ) -> dict:
-    """
-    Return runs currently tracked in the running ZSET with their state.
-    Operator-only.
-    """
     _tenant_header(x_tenant_id)
     _require_operator(x_cp_auth)
-
     from hfa.runtime.state_store import StateStore
     state_store = StateStore(request.app.state.redis)
     runs = await state_store.get_running_runs(limit=200)
@@ -396,30 +403,239 @@ async def diagnostics_recovery(
     x_tenant_id: str = Header(...),
     x_cp_auth:   str = Header(default=""),
 ) -> dict:
-    """Return DLQ depth and schedulable worker count for recovery visibility."""
     _tenant_header(x_tenant_id)
     _require_operator(x_cp_auth)
-
     cp = request.app.state.cp
     try:
         dlq_depth = await cp.recovery.dlq_depth()
     except Exception:
         dlq_depth = -1
-
     try:
         schedulable = await cp.registry.list_schedulable_workers()
         draining    = [
-            w for w in await cp.registry.list_healthy_workers() if w.is_draining
+            w for w in await cp.registry.list_healthy_workers()
+            if w.is_draining
         ]
     except Exception:
-        schedulable = []
-        draining    = []
-
+        schedulable = []; draining = []
     return {
-        "dlq_depth":          dlq_depth,
+        "dlq_depth":           dlq_depth,
         "schedulable_workers": len(schedulable),
         "draining_workers":    len(draining),
     }
+
+
+# ------------------------------------------------------------------
+# Sprint 13 — Liveness / Readiness (new, clean semantics)
+# ------------------------------------------------------------------
+
+@router.get("/health/live", response_model=LiveResponse)
+async def health_live(request: Request) -> LiveResponse:
+    """Liveness probe — returns 200 if the process is alive."""
+    cp = request.app.state.cp
+    data = await cp.get_liveness()
+    return LiveResponse(**data)
+
+
+@router.get("/health/ready", response_model=ReadyResponse)
+async def health_ready(request: Request) -> ReadyResponse:
+    """Readiness probe — returns 200 when all critical dependencies are up."""
+    cp   = request.app.state.cp
+    data = await cp.get_readiness()
+    checks = {
+        k: ReadyCheckDetail(**v) for k, v in data["checks"].items()
+    }
+    resp = ReadyResponse(
+        status=data["status"],
+        instance_id=data["instance_id"],
+        is_leader=data["is_leader"],
+        checks=checks,
+    )
+    if data["status"] != "ready":
+        return JSONResponse(
+            status_code=503,
+            content=resp.model_dump(),
+        )
+    return resp
+
+
+# ------------------------------------------------------------------
+# Sprint 13 — Worker visibility (new)
+# ------------------------------------------------------------------
+
+@router.get("/workers/healthy", response_model=WorkerListResponse)
+async def workers_healthy(request: Request) -> WorkerListResponse:
+    """Workers that are alive (including draining)."""
+    cp      = request.app.state.cp
+    workers = await cp.list_healthy_workers()
+    return WorkerListResponse(
+        count=len(workers),
+        workers=[_worker_summary(w) for w in workers],
+    )
+
+
+@router.get("/workers/schedulable", response_model=WorkerListResponse)
+async def workers_schedulable(request: Request) -> WorkerListResponse:
+    """Workers eligible to receive new runs (non-draining, under capacity)."""
+    cp      = request.app.state.cp
+    workers = await cp.list_schedulable_workers()
+    return WorkerListResponse(
+        count=len(workers),
+        workers=[_worker_summary(w) for w in workers],
+    )
+
+
+# ------------------------------------------------------------------
+# Sprint 13 — Run visibility (new)
+# ------------------------------------------------------------------
+
+@router.get("/runs/running", response_model=RunningRunsResponse)
+async def runs_running(
+    request: Request,
+    limit:   int = 100,
+) -> RunningRunsResponse:
+    """List runs currently tracked in the running ZSET."""
+    cp   = request.app.state.cp
+    runs = await cp.list_running_runs(limit=limit)
+    summaries = [
+        RunningRunSummary(
+            run_id=r["run_id"],
+            tenant_id=r["tenant_id"],
+            state=r["state"],
+            worker_group=r["worker_group"],
+            shard=r["shard"],
+            started_at=r["started_at"],
+            claim_owner=r.get("claim_owner"),
+        )
+        for r in runs
+    ]
+    return RunningRunsResponse(count=len(summaries), runs=summaries)
+
+
+@router.get("/runs/{run_id}/state", response_model=RunStateResponse)
+async def run_state(
+    run_id:      str,
+    request:     Request,
+    x_tenant_id: str = Header(...),
+) -> RunStateResponse:
+    """Return state and metadata for a run."""
+    _tenant_header(x_tenant_id)
+    cp   = request.app.state.cp
+    data = await cp.get_run_state(run_id)
+    if data["state"] == "unknown" and not data["tenant_id"]:
+        raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
+    if data["tenant_id"] and data["tenant_id"] != x_tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant mismatch")
+    return RunStateResponse(**data)
+
+
+@router.get("/runs/{run_id}/claim", response_model=RunClaimResponse)
+async def run_claim(
+    run_id:  str,
+    request: Request,
+) -> RunClaimResponse:
+    """Return claim ownership and TTL for a run."""
+    cp   = request.app.state.cp
+    data = await cp.get_run_claim(run_id)
+    return RunClaimResponse(**data)
+
+
+@router.get("/runs/{run_id}/result", response_model=RunResultResponse)
+async def run_result(
+    run_id:      str,
+    request:     Request,
+    x_tenant_id: str = Header(...),
+) -> RunResultResponse:
+    """Return stored result for a completed run."""
+    _tenant_header(x_tenant_id)
+    cp     = request.app.state.cp
+    result = await cp.get_run_result(run_id)
+    if result is None:
+        raise HTTPException(
+            status_code=404, detail=f"No result found for run {run_id!r}"
+        )
+    if result.get("tenant_id") and result["tenant_id"] != x_tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant mismatch")
+    return RunResultResponse(
+        run_id=result.get("run_id", run_id),
+        tenant_id=result.get("tenant_id", ""),
+        status=result.get("status", ""),
+        cost_cents=int(result.get("cost_cents", 0)),
+        tokens_used=int(result.get("tokens_used", 0)),
+        error=result.get("error"),
+        payload=result.get("payload", {}),
+        completed_at=float(result.get("completed_at", 0)),
+    )
+
+
+# ------------------------------------------------------------------
+# Sprint 13 — Recovery visibility (new)
+# ------------------------------------------------------------------
+
+@router.get("/recovery/stale", response_model=StaleRunsResponse)
+async def recovery_stale(
+    request:     Request,
+    x_tenant_id: str = Header(...),
+    x_cp_auth:   str = Header(default=""),
+) -> StaleRunsResponse:
+    """List runs currently considered stale by the recovery sweep."""
+    _tenant_header(x_tenant_id)
+    _require_operator(x_cp_auth)
+    cp   = request.app.state.cp
+    runs = await cp.list_stale_runs()
+    summaries = [
+        StaleRunSummary(
+            run_id=r["run_id"],
+            tenant_id=r["tenant_id"],
+            state=r["state"],
+            worker_group=r["worker_group"],
+            reschedule_count=r["reschedule_count"],
+            running_since=r["running_since"],
+            stale_for_seconds=r["stale_for_seconds"],
+        )
+        for r in runs
+    ]
+    return StaleRunsResponse(count=len(summaries), runs=summaries)
+
+
+@router.get("/recovery/summary", response_model=RecoverySummaryResponse)
+async def recovery_summary(
+    request:     Request,
+    x_tenant_id: str = Header(...),
+    x_cp_auth:   str = Header(default=""),
+) -> RecoverySummaryResponse:
+    """Return aggregated recovery metrics."""
+    _tenant_header(x_tenant_id)
+    _require_operator(x_cp_auth)
+    cp   = request.app.state.cp
+    data = await cp.get_recovery_summary()
+    return RecoverySummaryResponse(**data)
+
+
+@router.get("/recovery/dlq", response_model=DLQListResponse)
+async def recovery_dlq(
+    request:     Request,
+    x_tenant_id: str = Header(...),
+    x_cp_auth:   str = Header(default=""),
+) -> DLQListResponse:
+    """List DLQ entries (all tenants, operator-only)."""
+    _tenant_header(x_tenant_id)
+    _require_operator(x_cp_auth)
+    cp      = request.app.state.cp
+    entries = await cp.list_dlq(tenant_id="", limit=100)
+    responses = [
+        DLQEntryResponse(
+            run_id=e["run_id"],
+            tenant_id=e["tenant_id"],
+            reason=e["reason"],
+            delivery_count=e["reschedule_count"],
+            dead_lettered_at=e["dead_lettered_at"],
+            original_error=e.get("original_error", ""),
+            cost_cents=e.get("cost_cents", 0),
+        )
+        for e in entries
+    ]
+    return DLQListResponse(count=len(responses), entries=responses)
 
 
 # ------------------------------------------------------------------
@@ -427,7 +643,6 @@ async def diagnostics_recovery(
 # ------------------------------------------------------------------
 
 def _worker_resp(profile) -> WorkerResponse:
-    from hfa_control.api.models import WorkerResponse
     return WorkerResponse(
         worker_id=profile.worker_id,
         worker_group=profile.worker_group,
@@ -440,4 +655,20 @@ def _worker_resp(profile) -> WorkerResponse:
         last_seen=profile.last_seen,
         version=profile.version,
         capabilities=profile.capabilities,
+    )
+
+
+def _worker_summary(profile) -> WorkerSummary:
+    from hfa_control.models import WorkerStatus
+    return WorkerSummary(
+        worker_id=profile.worker_id,
+        worker_group=profile.worker_group,
+        region=profile.region,
+        status=profile.status.value,
+        is_draining=profile.is_draining,
+        inflight=profile.inflight,
+        capacity=profile.capacity,
+        shards=profile.shards,
+        version=profile.version,
+        last_seen=profile.last_seen,
     )

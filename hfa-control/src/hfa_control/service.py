@@ -166,8 +166,200 @@ class ControlPlaneService:
             except asyncio.CancelledError:
                 break
 
+    # ------------------------------------------------------------------
+    # Sprint 13 — operational query surface
+    # All methods are read-only and safe to call from any instance.
+    # ------------------------------------------------------------------
+
+    async def get_liveness(self) -> dict:
+        """Return liveness information. Never raises."""
+        return {
+            "status": "alive",
+            "service": "hfa-control",
+            "instance_id": self._config.instance_id,
+        }
+
+    async def get_readiness(self) -> dict:
+        """
+        Return readiness state with per-check details.
+        status = "ready" only when all critical checks pass.
+        """
+        checks: dict = {}
+
+        # Check 1: Redis ping
+        try:
+            await self._redis.ping()
+            checks["redis"] = {"ok": True, "message": ""}
+        except Exception as exc:
+            checks["redis"] = {"ok": False, "message": str(exc)[:120]}
+
+        # Check 2: control stream exists / reachable
+        try:
+            await self._redis.xlen(self._config.control_stream)
+            checks["control_stream"] = {"ok": True, "message": ""}
+        except Exception as exc:
+            checks["control_stream"] = {"ok": False, "message": str(exc)[:120]}
+
+        # Check 3: heartbeat stream exists / reachable
+        try:
+            await self._redis.xlen(self._config.heartbeat_stream)
+            checks["heartbeat_stream"] = {"ok": True, "message": ""}
+        except Exception as exc:
+            checks["heartbeat_stream"] = {
+                "ok": False, "message": str(exc)[:120]
+            }
+
+        all_ok = all(v["ok"] for v in checks.values())
+        return {
+            "status": "ready" if all_ok else "not_ready",
+            "instance_id": self._config.instance_id,
+            "is_leader": self._leader.is_leader,
+            "checks": checks,
+        }
+
+    async def list_all_workers(self) -> list:
+        """Return all known workers (healthy + draining), not DEAD."""
+        return await self._registry.list_healthy_workers()
+
+    async def list_healthy_workers(self) -> list:
+        """Return healthy workers (alive, not DEAD)."""
+        return await self._registry.list_healthy_workers()
+
+    async def list_schedulable_workers(self) -> list:
+        """Return workers eligible to receive new runs."""
+        return await self._registry.list_schedulable_workers()
+
+    async def get_worker(self, worker_id: str):
+        """Return a single worker profile. Raises WorkerNotFoundError if absent."""
+        return await self._registry.get_worker(worker_id)
+
+    async def list_running_runs(self, limit: int = 100) -> list:
+        """
+        Return up to `limit` runs from the running ZSET with metadata.
+        Each entry: run_id, state, started_at, tenant_id, worker_group,
+        shard, claim_owner.
+        """
+        from hfa.runtime.state_store import StateStore
+        store = StateStore(self._redis)
+        base = await store.get_running_runs(limit=limit)
+        enriched = []
+        for entry in base:
+            run_id = entry["run_id"]
+            meta = await store.get_run_meta(run_id)
+            claim_owner = await store.get_claim_owner(run_id)
+            enriched.append({
+                "run_id":       run_id,
+                "tenant_id":    meta.get("tenant_id", ""),
+                "state":        entry.get("state", "unknown"),
+                "worker_group": meta.get("worker_group", ""),
+                "shard":        int(meta.get("shard", "0") or "0"),
+                "started_at":   entry.get("started_at", 0.0),
+                "claim_owner":  claim_owner,
+            })
+        return enriched
+
+    async def get_run_state(self, run_id: str) -> dict:
+        """Return run state + metadata dict."""
+        from hfa.runtime.state_store import StateStore
+        store = StateStore(self._redis)
+        state = await store.get_run_state(run_id)
+        meta = await store.get_run_meta(run_id)
+        return {
+            "run_id":           run_id,
+            "tenant_id":        meta.get("tenant_id", ""),
+            "state":            state or "unknown",
+            "worker_group":     meta.get("worker_group", ""),
+            "shard":            int(meta.get("shard", "0") or "0"),
+            "reschedule_count": int(meta.get("reschedule_count", "0") or "0"),
+            "admitted_at":      float(meta.get("admitted_at", "0") or "0"),
+        }
+
+    async def get_run_claim(self, run_id: str) -> dict:
+        """Return claim ownership and TTL for a run."""
+        from hfa.runtime.state_store import StateStore
+        store = StateStore(self._redis)
+        owner = await store.get_claim_owner(run_id)
+        ttl = await store.get_claim_ttl(run_id) if owner else -2
+        return {
+            "run_id":      run_id,
+            "claimed":     owner is not None,
+            "owner":       owner,
+            "ttl_seconds": max(ttl, 0) if ttl > 0 else 0,
+        }
+
+    async def get_run_result(self, run_id: str):
+        """Return stored run result dict or None."""
+        from hfa.runtime.state_store import StateStore
+        return await StateStore(self._redis).get_result(run_id)
+
+    async def list_stale_runs(self) -> list:
+        """
+        Return run_ids that would be considered stale by recovery,
+        enriched with metadata for operator visibility.
+        """
+        import time
+        stale_ids = await self._recovery._find_stale_runs()
+        result = []
+        for run_id in stale_ids:
+            meta = await self._redis.hgetall(f"hfa:run:meta:{run_id}")
+
+            def _s(k: str) -> str:
+                v = meta.get(k.encode()) or meta.get(k)
+                return (v.decode() if isinstance(v, bytes) else v) or ""
+
+            score_raw = await self._redis.zscore(
+                self._config.running_zset, run_id
+            )
+            running_since = float(score_raw) if score_raw else 0.0
+            stale_for = time.time() - running_since
+
+            result.append({
+                "run_id":           run_id,
+                "tenant_id":        _s("tenant_id"),
+                "state":            _s("state") or "unknown",
+                "worker_group":     _s("worker_group"),
+                "reschedule_count": int(_s("reschedule_count") or "0"),
+                "running_since":    running_since,
+                "stale_for_seconds": round(stale_for, 1),
+            })
+        return result
+
+    async def get_recovery_summary(self) -> dict:
+        """Return aggregated recovery visibility metrics."""
+        stale_ids = await self._recovery._find_stale_runs()
+        dlq_entries = await self._recovery.list_dlq("__all__", limit=1000)
+        schedulable = await self._registry.list_schedulable_workers()
+        all_alive = await self._registry.list_healthy_workers()
+        draining = [w for w in all_alive if w.is_draining]
+        return {
+            "stale_count":         len(stale_ids),
+            "dlq_count":           len(dlq_entries),
+            "schedulable_workers": len(schedulable),
+            "draining_workers":    len(draining),
+        }
+
+    async def list_dlq(self, tenant_id: str = "", limit: int = 50) -> list:
+        """Return DLQ entries. If tenant_id is empty, returns all entries."""
+        return await self._recovery.list_dlq(tenant_id or "__all__", limit)
+
 
 def _config_from_env() -> ControlPlaneConfig:
+    return ControlPlaneConfig(
+        region=os.environ.get("CP_REGION", "us-east-1"),
+        instance_id=os.environ.get("CP_INSTANCE_ID", ""),
+        worker_heartbeat_ttl=float(
+            os.environ.get("WORKER_HEARTBEAT_TTL", "30")
+        ),
+        stale_run_timeout=float(
+            os.environ.get("STALE_RUN_TIMEOUT", "600")
+        ),
+        recovery_sweep_interval=float(
+            os.environ.get("RECOVERY_SWEEP_INTERVAL", "30")
+        ),
+        max_reschedule_attempts=int(
+            os.environ.get("MAX_RESCHEDULE_ATTEMPTS", "3")
+        ),
+    )
     return ControlPlaneConfig(
         region=os.environ.get("CP_REGION", "us-east-1"),
         instance_id=os.environ.get("CP_INSTANCE_ID", ""),
