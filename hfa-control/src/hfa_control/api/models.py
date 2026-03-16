@@ -41,7 +41,7 @@ except ImportError:
 def _model(cls):
     """Decorator: apply dataclass if Pydantic absent, else return as-is."""
     try:
-        from pydantic import BaseModel
+        # from pydantic import BaseModel
 
         return cls
     except ImportError:
