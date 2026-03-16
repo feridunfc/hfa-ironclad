@@ -103,7 +103,9 @@ def _setup_otlp_metrics(
         metrics.set_meter_provider(provider)
         result.meter_provider = provider
 
-        logger.info("OTel metrics bootstrap: OTLP exporter enabled endpoint=%s", endpoint)
+        logger.info(
+            "OTel metrics bootstrap: OTLP exporter enabled endpoint=%s", endpoint
+        )
     except Exception as exc:
         logger.warning("OTLP metrics bootstrap failed: %s", exc)
 
@@ -142,7 +144,9 @@ def _setup_otlp_tracing(
         trace.set_tracer_provider(provider)
         result.tracer_provider = provider
 
-        logger.info("OTel tracing bootstrap: OTLP exporter enabled endpoint=%s", endpoint)
+        logger.info(
+            "OTel tracing bootstrap: OTLP exporter enabled endpoint=%s", endpoint
+        )
     except Exception as exc:
         logger.warning("OTLP tracing bootstrap failed: %s", exc)
 
@@ -160,7 +164,10 @@ def _setup_console_tracing(
         from opentelemetry import trace
         from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider
-        from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+        from opentelemetry.sdk.trace.export import (
+            BatchSpanProcessor,
+            ConsoleSpanExporter,
+        )
     except Exception as exc:
         logger.warning(
             "Console tracing bootstrap unavailable (%s) -- tracing exporter disabled",
@@ -220,7 +227,9 @@ def bootstrap_otel() -> OTelProviders:
     elif metrics_exp == "none":
         logger.info("OTel metrics bootstrap: disabled")
     else:
-        logger.warning("Unknown OTEL_METRICS_EXPORTER=%r -- metrics disabled", metrics_exp)
+        logger.warning(
+            "Unknown OTEL_METRICS_EXPORTER=%r -- metrics disabled", metrics_exp
+        )
 
     # Tracing
     if traces_exp == "otlp":
@@ -230,12 +239,16 @@ def bootstrap_otel() -> OTelProviders:
     elif traces_exp == "none":
         logger.info("OTel tracing bootstrap: disabled")
     else:
-        logger.warning("Unknown OTEL_TRACES_EXPORTER=%r -- tracing disabled", traces_exp)
+        logger.warning(
+            "Unknown OTEL_TRACES_EXPORTER=%r -- tracing disabled", traces_exp
+        )
 
     return result
 
 
-def mount_prometheus(app: Any, providers: OTelProviders, path: str = "/metrics") -> None:
+def mount_prometheus(
+    app: Any, providers: OTelProviders, path: str = "/metrics"
+) -> None:
     """
     Mount Prometheus ASGI app if available.
 

@@ -2,6 +2,7 @@
 hfa-control/src/hfa_control/models.py
 IRONCLAD Sprint 10 — Shared data models
 """
+
 from __future__ import annotations
 
 import json
@@ -11,34 +12,34 @@ from typing import List
 
 
 class WorkerStatus(str, Enum):
-    HEALTHY  = "healthy"
-    DEGRADED = "degraded"   # 1–2 missed heartbeats
-    DRAINING = "draining"   # graceful shutdown
-    DEAD     = "dead"       # TTL expired — no new placements
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"  # 1–2 missed heartbeats
+    DRAINING = "draining"  # graceful shutdown
+    DEAD = "dead"  # TTL expired — no new placements
 
 
 class RunState(str, Enum):
-    ADMITTED      = "admitted"
-    SCHEDULED     = "scheduled"
-    RUNNING       = "running"
-    DONE          = "done"
-    FAILED        = "failed"
-    RESCHEDULED   = "rescheduled"
+    ADMITTED = "admitted"
+    SCHEDULED = "scheduled"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    RESCHEDULED = "rescheduled"
     DEAD_LETTERED = "dead_lettered"
 
 
 @dataclass
 class WorkerProfile:
-    worker_id:    str
+    worker_id: str
     worker_group: str
-    region:       str
-    capacity:     int
-    inflight:     int
-    status:       WorkerStatus = WorkerStatus.HEALTHY
-    last_seen:    float        = 0.0
-    shards:       List[int]    = field(default_factory=list)
-    version:      str          = ""
-    capabilities: List[str]    = field(default_factory=list)
+    region: str
+    capacity: int
+    inflight: int
+    status: WorkerStatus = WorkerStatus.HEALTHY
+    last_seen: float = 0.0
+    shards: List[int] = field(default_factory=list)
+    version: str = ""
+    capabilities: List[str] = field(default_factory=list)
 
     @property
     def load_factor(self) -> float:
@@ -103,22 +104,22 @@ class WorkerProfile:
 
 @dataclass
 class ControlPlaneConfig:
-    region:                   str   = "us-east-1"
-    instance_id:              str   = ""
-    stream_shards:            int   = 32
-    worker_heartbeat_ttl:     float = 30.0    # declare DEAD after this many seconds
-    stale_run_timeout:        float = 600.0   # seconds before running→rescheduled
-    recovery_sweep_interval:  float = 30.0
-    registry_ttl:             int   = 60      # Redis TTL for worker hash key
-    max_reschedule_attempts:  int   = 3
-    dlq_stream:               str   = "hfa:stream:dlq"
-    heartbeat_stream:         str   = "hfa:stream:heartbeat"
-    results_stream:           str   = "hfa:stream:results"
-    control_stream:           str   = "hfa:stream:control"
-    leader_key:               str   = "hfa:cp:leader"
-    leader_ttl:               int   = 15
-    leader_renew_interval:    float = 5.0
-    running_zset:             str   = "hfa:cp:running"
+    region: str = "us-east-1"
+    instance_id: str = ""
+    stream_shards: int = 32
+    worker_heartbeat_ttl: float = 30.0  # declare DEAD after this many seconds
+    stale_run_timeout: float = 600.0  # seconds before running→rescheduled
+    recovery_sweep_interval: float = 30.0
+    registry_ttl: int = 60  # Redis TTL for worker hash key
+    max_reschedule_attempts: int = 3
+    dlq_stream: str = "hfa:stream:dlq"
+    heartbeat_stream: str = "hfa:stream:heartbeat"
+    results_stream: str = "hfa:stream:results"
+    control_stream: str = "hfa:stream:control"
+    leader_key: str = "hfa:cp:leader"
+    leader_ttl: int = 15
+    leader_renew_interval: float = 5.0
+    running_zset: str = "hfa:cp:running"
     # XAUTOCLAIM settings
-    autoclaim_idle_ms:        int   = 30_000   # reclaim after 30s idle in PEL
-    autoclaim_count:          int   = 10
+    autoclaim_idle_ms: int = 30_000  # reclaim after 30s idle in PEL
+    autoclaim_count: int = 10

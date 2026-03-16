@@ -28,6 +28,7 @@ Design
 * On Redis unavailability the guard fails-CLOSED (denies spend) by default.
 * Recovery entry restores state after node restart (no audit gap).
 """
+
 from __future__ import annotations
 
 import logging
@@ -41,6 +42,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Unit helpers
 # ---------------------------------------------------------------------------
+
 
 def usd_to_cents(usd: float) -> int:
     """
@@ -137,10 +139,11 @@ return 1
 # Data models
 # ---------------------------------------------------------------------------
 
+
 class BudgetStatus(str, Enum):
-    ACTIVE    = "active"
+    ACTIVE = "active"
     EXHAUSTED = "exhausted"
-    FROZEN    = "frozen"
+    FROZEN = "frozen"
 
 
 @dataclass(frozen=True)
@@ -150,11 +153,12 @@ class BudgetState:
     All ``_cents`` fields are integer cents; ``_usd`` properties are
     convenience views for logging only — never use for arithmetic.
     """
-    tenant_id:       str
-    run_id:          str
-    spent_cents:     int
-    limit_cents:     int
-    status:          BudgetStatus
+
+    tenant_id: str
+    run_id: str
+    spent_cents: int
+    limit_cents: int
+    status: BudgetStatus
     remaining_cents: int = field(init=False)
 
     def __post_init__(self) -> None:
@@ -185,8 +189,8 @@ class BudgetExhaustedError(Exception):
         attempted_cents: int,
         remaining_cents: int,
     ) -> None:
-        self.tenant_id       = tenant_id
-        self.run_id          = run_id
+        self.tenant_id = tenant_id
+        self.run_id = run_id
         self.attempted_cents = attempted_cents
         self.remaining_cents = remaining_cents
         super().__init__(
@@ -202,6 +206,7 @@ class BudgetGuardError(Exception):
 # ---------------------------------------------------------------------------
 # BudgetGuard
 # ---------------------------------------------------------------------------
+
 
 class BudgetGuard:
     """
@@ -228,13 +233,13 @@ class BudgetGuard:
         key_prefix: str = "budget",
         fail_open: bool = False,
     ) -> None:
-        self._redis     = redis
-        self._prefix    = key_prefix
+        self._redis = redis
+        self._prefix = key_prefix
         self._fail_open = fail_open
-        self._sha_debit:  Optional[str] = None
-        self._sha_check:  Optional[str] = None
+        self._sha_debit: Optional[str] = None
+        self._sha_check: Optional[str] = None
         self._sha_freeze: Optional[str] = None
-        self._sha_reset:  Optional[str] = None
+        self._sha_reset: Optional[str] = None
         logger.info("BudgetGuard created (fail_open=%s)", fail_open)
 
     # ------------------------------------------------------------------
@@ -250,10 +255,10 @@ class BudgetGuard:
             BudgetGuardError: If Redis is unreachable.
         """
         try:
-            self._sha_debit  = await self._redis.script_load(_DEBIT_SCRIPT)
-            self._sha_check  = await self._redis.script_load(_CHECK_SCRIPT)
+            self._sha_debit = await self._redis.script_load(_DEBIT_SCRIPT)
+            self._sha_check = await self._redis.script_load(_CHECK_SCRIPT)
             self._sha_freeze = await self._redis.script_load(_FREEZE_SCRIPT)
-            self._sha_reset  = await self._redis.script_load(_RESET_SCRIPT)
+            self._sha_reset = await self._redis.script_load(_RESET_SCRIPT)
             logger.info(
                 "BudgetGuard Lua scripts loaded (SHA debit=%s…)", self._sha_debit[:8]
             )
@@ -308,7 +313,11 @@ class BudgetGuard:
             await pipe.execute()
             logger.info(
                 "Budget set: tenant=%s run=%s limit=%d¢ ($%.2f) reset=%s",
-                tenant_id, run_id, limit_cents, cents_to_usd(limit_cents), reset_spent,
+                tenant_id,
+                run_id,
+                limit_cents,
+                cents_to_usd(limit_cents),
+                reset_spent,
             )
         except Exception as exc:
             logger.error("set_budget failed: %s", exc, exc_info=True)
@@ -356,7 +365,7 @@ class BudgetGuard:
             # Atomic pre-check (no debit yet)
             can_spend = await self._redis.evalsha(
                 self._sha_check,
-                2,                     # ✅ IRONCLAD: unpacked int, not list
+                2,  # ✅ IRONCLAD: unpacked int, not list
                 spent_key,
                 status_key,
                 str(amount_cents),
@@ -375,7 +384,7 @@ class BudgetGuard:
             # Atomic debit
             result = await self._redis.evalsha(
                 self._sha_debit,
-                2,                     # ✅ IRONCLAD: unpacked int, not list
+                2,  # ✅ IRONCLAD: unpacked int, not list
                 spent_key,
                 status_key,
                 str(amount_cents),
@@ -383,7 +392,7 @@ class BudgetGuard:
             )
 
             new_spent_cents = int(result[0])
-            status          = BudgetStatus(result[1])
+            status = BudgetStatus(result[1])
 
             state = BudgetState(
                 tenant_id=tenant_id,
@@ -394,10 +403,13 @@ class BudgetGuard:
             )
             logger.info(
                 "Debit OK: tenant=%s run=%s amount=%d¢ spent=%d¢/%d¢ ($%.2f/$%.2f) status=%s",
-                tenant_id, run_id,
+                tenant_id,
+                run_id,
                 amount_cents,
-                new_spent_cents, limit_cents,
-                cents_to_usd(new_spent_cents), cents_to_usd(limit_cents),
+                new_spent_cents,
+                limit_cents,
+                cents_to_usd(new_spent_cents),
+                cents_to_usd(limit_cents),
                 status.value,
             )
             return state
@@ -456,7 +468,9 @@ class BudgetGuard:
         _, _, status_key = self._keys(tenant_id, run_id)
         try:
             await self._redis.evalsha(
-                self._sha_freeze, 1, status_key  # ✅ unpacked
+                self._sha_freeze,
+                1,
+                status_key,  # ✅ unpacked
             )
             logger.warning("Budget FROZEN: tenant=%s run=%s", tenant_id, run_id)
         except Exception as exc:
@@ -469,7 +483,10 @@ class BudgetGuard:
         _, spent_key, status_key = self._keys(tenant_id, run_id)
         try:
             await self._redis.evalsha(
-                self._sha_reset, 2, spent_key, status_key  # ✅ unpacked
+                self._sha_reset,
+                2,
+                spent_key,
+                status_key,  # ✅ unpacked
             )
             logger.info("Budget RESET: tenant=%s run=%s", tenant_id, run_id)
         except Exception as exc:
@@ -508,14 +525,18 @@ class BudgetGuard:
         limit_key, spent_key, status_key = self._keys(tenant_id, run_id)
         try:
             pipe = self._redis.pipeline()
-            pipe.set(limit_key,  str(limit_cents))
-            pipe.set(spent_key,  str(spent_cents))
+            pipe.set(limit_key, str(limit_cents))
+            pipe.set(spent_key, str(spent_cents))
             status = "exhausted" if spent_cents >= limit_cents else "active"
             pipe.set(status_key, status)
             await pipe.execute()
             logger.info(
                 "Budget RECOVERED: tenant=%s run=%s spent=%d¢/%d¢ status=%s",
-                tenant_id, run_id, spent_cents, limit_cents, status,
+                tenant_id,
+                run_id,
+                spent_cents,
+                limit_cents,
+                status,
             )
         except Exception as exc:
             logger.error("recover_run failed: %s", exc, exc_info=True)
@@ -534,9 +555,7 @@ class BudgetGuard:
     ) -> int:
         raw = await self._redis.get(limit_key)
         if raw is None:
-            raise BudgetGuardError(
-                f"Budget not initialised for {tenant_id}/{run_id}"
-            )
+            raise BudgetGuardError(f"Budget not initialised for {tenant_id}/{run_id}")
         return int(raw)
 
     def _assert_initialised(self) -> None:

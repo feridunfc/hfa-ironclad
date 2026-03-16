@@ -14,6 +14,7 @@ Usage
   python scripts/genesis.py generate-ledger-key --out-dir /secrets --env-snippet
   python scripts/genesis.py generate-ledger-key --key-id prod-2025-03
 """
+
 import argparse
 import logging
 import sys
@@ -30,6 +31,7 @@ logger = logging.getLogger("genesis")
 # ---------------------------------------------------------------------------
 # Key generation
 # ---------------------------------------------------------------------------
+
 
 def _require_cryptography() -> None:
     """Fail fast with a clear message if cryptography is not installed."""
@@ -74,18 +76,14 @@ def cmd_generate_ledger_key(args: argparse.Namespace) -> None:
         raise SystemExit(1) from exc
 
     # Derive a timestamped key ID when not provided
-    key_id: str = args.key_id or (
-        f"ledger-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
-    )
+    key_id: str = args.key_id or (f"ledger-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}")
 
     private_key_path = out_dir / f"{key_id}.private.pem"
     public_key_path = out_dir / f"{key_id}.public.pem"
 
     # Guard: never silently overwrite an existing private key
     if private_key_path.exists() and not args.force:
-        logger.error(
-            "Private key already exists: %s — use --force to overwrite", private_key_path
-        )
+        logger.error("Private key already exists: %s — use --force to overwrite", private_key_path)
         raise SystemExit(1)
 
     logger.info("Generating Ed25519 key pair (key_id=%s)…", key_id)
@@ -155,6 +153,7 @@ def cmd_generate_ledger_key(args: argparse.Namespace) -> None:
 # CLI plumbing
 # ---------------------------------------------------------------------------
 
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="genesis",
@@ -177,10 +176,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--key-id",
         default=None,
         metavar="ID",
-        help=(
-            "Logical key identifier, e.g. 'prod-2025-03'. "
-            "Defaults to 'ledger-<timestamp>'."
-        ),
+        help=("Logical key identifier, e.g. 'prod-2025-03'. Defaults to 'ledger-<timestamp>'."),
     )
     glk.add_argument(
         "--env-snippet",

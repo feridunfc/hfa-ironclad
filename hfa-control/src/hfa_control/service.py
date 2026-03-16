@@ -12,6 +12,7 @@ IRONCLAD rules
 * No asyncio.get_event_loop() — get_running_loop().
 * close() always safe (idempotent, each component guards its own close).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -20,13 +21,13 @@ import os
 import uuid
 from typing import Optional
 
-from hfa_control.models     import ControlPlaneConfig
-from hfa_control.leader     import LeaderElection
-from hfa_control.registry   import WorkerRegistry
-from hfa_control.shard      import ShardOwnershipManager
-from hfa_control.admission  import AdmissionController
-from hfa_control.scheduler  import Scheduler
-from hfa_control.recovery   import RecoveryService
+from hfa_control.models import ControlPlaneConfig
+from hfa_control.leader import LeaderElection
+from hfa_control.registry import WorkerRegistry
+from hfa_control.shard import ShardOwnershipManager
+from hfa_control.admission import AdmissionController
+from hfa_control.scheduler import Scheduler
+from hfa_control.recovery import RecoveryService
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +35,8 @@ _LEADER_CHECK_INTERVAL = 5.0  # seconds
 
 
 class ControlPlaneService:
-
     def __init__(self, redis, config: Optional[ControlPlaneConfig] = None) -> None:
-        self._redis  = redis
+        self._redis = redis
         self._config = config or _config_from_env()
         # Assign a unique instance_id if not set
         if not self._config.instance_id:
@@ -44,15 +44,15 @@ class ControlPlaneService:
                 "CP_INSTANCE_ID", uuid.uuid4().hex[:8]
             )
 
-        self._leader    = LeaderElection(redis, self._config.instance_id, self._config)
-        self._registry  = WorkerRegistry(redis, self._config)
-        self._shards    = ShardOwnershipManager(redis, self._config)
-        self._admitter  = AdmissionController(redis, self._config)
+        self._leader = LeaderElection(redis, self._config.instance_id, self._config)
+        self._registry = WorkerRegistry(redis, self._config)
+        self._shards = ShardOwnershipManager(redis, self._config)
+        self._admitter = AdmissionController(redis, self._config)
         self._scheduler = Scheduler(redis, self._registry, self._shards, self._config)
-        self._recovery  = RecoveryService(redis, self._config)
+        self._recovery = RecoveryService(redis, self._config)
 
         self._leader_task: Optional[asyncio.Task] = None
-        self._sched_started    = False
+        self._sched_started = False
         self._recovery_started = False
 
     # ------------------------------------------------------------------
@@ -96,7 +96,8 @@ class ControlPlaneService:
         )
         logger.info(
             "ControlPlaneService started: instance=%s region=%s",
-            self._config.instance_id, self._config.region,
+            self._config.instance_id,
+            self._config.region,
         )
 
     async def close(self) -> None:
@@ -205,9 +206,7 @@ class ControlPlaneService:
             await self._redis.xlen(self._config.heartbeat_stream)
             checks["heartbeat_stream"] = {"ok": True, "message": ""}
         except Exception as exc:
-            checks["heartbeat_stream"] = {
-                "ok": False, "message": str(exc)[:120]
-            }
+            checks["heartbeat_stream"] = {"ok": False, "message": str(exc)[:120]}
 
         all_ok = all(v["ok"] for v in checks.values())
         return {
@@ -240,6 +239,7 @@ class ControlPlaneService:
         shard, claim_owner.
         """
         from hfa.runtime.state_store import StateStore
+
         store = StateStore(self._redis)
         base = await store.get_running_runs(limit=limit)
         enriched = []
@@ -247,49 +247,54 @@ class ControlPlaneService:
             run_id = entry["run_id"]
             meta = await store.get_run_meta(run_id)
             claim_owner = await store.get_claim_owner(run_id)
-            enriched.append({
-                "run_id":       run_id,
-                "tenant_id":    meta.get("tenant_id", ""),
-                "state":        entry.get("state", "unknown"),
-                "worker_group": meta.get("worker_group", ""),
-                "shard":        int(meta.get("shard", "0") or "0"),
-                "started_at":   entry.get("started_at", 0.0),
-                "claim_owner":  claim_owner,
-            })
+            enriched.append(
+                {
+                    "run_id": run_id,
+                    "tenant_id": meta.get("tenant_id", ""),
+                    "state": entry.get("state", "unknown"),
+                    "worker_group": meta.get("worker_group", ""),
+                    "shard": int(meta.get("shard", "0") or "0"),
+                    "started_at": entry.get("started_at", 0.0),
+                    "claim_owner": claim_owner,
+                }
+            )
         return enriched
 
     async def get_run_state(self, run_id: str) -> dict:
         """Return run state + metadata dict."""
         from hfa.runtime.state_store import StateStore
+
         store = StateStore(self._redis)
         state = await store.get_run_state(run_id)
         meta = await store.get_run_meta(run_id)
         return {
-            "run_id":           run_id,
-            "tenant_id":        meta.get("tenant_id", ""),
-            "state":            state or "unknown",
-            "worker_group":     meta.get("worker_group", ""),
-            "shard":            int(meta.get("shard", "0") or "0"),
+            "run_id": run_id,
+            "tenant_id": meta.get("tenant_id", ""),
+            "state": state or "unknown",
+            "worker_group": meta.get("worker_group", ""),
+            "shard": int(meta.get("shard", "0") or "0"),
             "reschedule_count": int(meta.get("reschedule_count", "0") or "0"),
-            "admitted_at":      float(meta.get("admitted_at", "0") or "0"),
+            "admitted_at": float(meta.get("admitted_at", "0") or "0"),
         }
 
     async def get_run_claim(self, run_id: str) -> dict:
         """Return claim ownership and TTL for a run."""
         from hfa.runtime.state_store import StateStore
+
         store = StateStore(self._redis)
         owner = await store.get_claim_owner(run_id)
         ttl = await store.get_claim_ttl(run_id) if owner else -2
         return {
-            "run_id":      run_id,
-            "claimed":     owner is not None,
-            "owner":       owner,
+            "run_id": run_id,
+            "claimed": owner is not None,
+            "owner": owner,
             "ttl_seconds": max(ttl, 0) if ttl > 0 else 0,
         }
 
     async def get_run_result(self, run_id: str):
         """Return stored run result dict or None."""
         from hfa.runtime.state_store import StateStore
+
         return await StateStore(self._redis).get_result(run_id)
 
     async def list_stale_runs(self) -> list:
@@ -298,6 +303,7 @@ class ControlPlaneService:
         enriched with metadata for operator visibility.
         """
         import time
+
         stale_ids = await self._recovery._find_stale_runs()
         result = []
         for run_id in stale_ids:
@@ -307,21 +313,21 @@ class ControlPlaneService:
                 v = meta.get(k.encode()) or meta.get(k)
                 return (v.decode() if isinstance(v, bytes) else v) or ""
 
-            score_raw = await self._redis.zscore(
-                self._config.running_zset, run_id
-            )
+            score_raw = await self._redis.zscore(self._config.running_zset, run_id)
             running_since = float(score_raw) if score_raw else 0.0
             stale_for = time.time() - running_since
 
-            result.append({
-                "run_id":           run_id,
-                "tenant_id":        _s("tenant_id"),
-                "state":            _s("state") or "unknown",
-                "worker_group":     _s("worker_group"),
-                "reschedule_count": int(_s("reschedule_count") or "0"),
-                "running_since":    running_since,
-                "stale_for_seconds": round(stale_for, 1),
-            })
+            result.append(
+                {
+                    "run_id": run_id,
+                    "tenant_id": _s("tenant_id"),
+                    "state": _s("state") or "unknown",
+                    "worker_group": _s("worker_group"),
+                    "reschedule_count": int(_s("reschedule_count") or "0"),
+                    "running_since": running_since,
+                    "stale_for_seconds": round(stale_for, 1),
+                }
+            )
         return result
 
     async def get_recovery_summary(self) -> dict:
@@ -332,10 +338,10 @@ class ControlPlaneService:
         all_alive = await self._registry.list_healthy_workers()
         draining = [w for w in all_alive if w.is_draining]
         return {
-            "stale_count":         len(stale_ids),
-            "dlq_count":           len(dlq_entries),
+            "stale_count": len(stale_ids),
+            "dlq_count": len(dlq_entries),
             "schedulable_workers": len(schedulable),
-            "draining_workers":    len(draining),
+            "draining_workers": len(draining),
         }
 
     async def list_dlq(self, tenant_id: str = "", limit: int = 50) -> list:
@@ -347,16 +353,8 @@ def _config_from_env() -> ControlPlaneConfig:
     return ControlPlaneConfig(
         region=os.environ.get("CP_REGION", "us-east-1"),
         instance_id=os.environ.get("CP_INSTANCE_ID", ""),
-        worker_heartbeat_ttl=float(
-            os.environ.get("WORKER_HEARTBEAT_TTL", "30")
-        ),
-        stale_run_timeout=float(
-            os.environ.get("STALE_RUN_TIMEOUT", "600")
-        ),
-        recovery_sweep_interval=float(
-            os.environ.get("RECOVERY_SWEEP_INTERVAL", "30")
-        ),
-        max_reschedule_attempts=int(
-            os.environ.get("MAX_RESCHEDULE_ATTEMPTS", "3")
-        ),
+        worker_heartbeat_ttl=float(os.environ.get("WORKER_HEARTBEAT_TTL", "30")),
+        stale_run_timeout=float(os.environ.get("STALE_RUN_TIMEOUT", "600")),
+        recovery_sweep_interval=float(os.environ.get("RECOVERY_SWEEP_INTERVAL", "30")),
+        max_reschedule_attempts=int(os.environ.get("MAX_RESCHEDULE_ATTEMPTS", "3")),
     )

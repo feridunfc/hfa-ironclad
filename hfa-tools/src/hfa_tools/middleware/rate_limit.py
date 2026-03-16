@@ -24,6 +24,7 @@ IRONCLAD rules applied:
   ✅ No ensure_future — asyncio.get_running_loop().create_task not needed here
   ✅ Fail-closed option (fail_open=False → 503 on Redis failure)
 """
+
 from __future__ import annotations
 
 import logging
@@ -67,16 +68,19 @@ class TenantRateLimitMiddleware(BaseHTTPMiddleware):
         fail_open: bool = True,
     ) -> None:
         super().__init__(app)
-        self._redis      = redis
-        self._rpm        = rpm
-        self._burst      = burst
-        self._limit      = rpm + burst
+        self._redis = redis
+        self._rpm = rpm
+        self._burst = burst
+        self._limit = rpm + burst
         self._skip_paths = skip_paths or {"/health", "/metrics", "/docs", "/openapi.json"}
-        self._fail_open  = fail_open
+        self._fail_open = fail_open
 
         logger.info(
             "TenantRateLimitMiddleware init: rpm=%d burst=%d limit=%d fail_open=%s",
-            rpm, burst, self._limit, fail_open,
+            rpm,
+            burst,
+            self._limit,
+            fail_open,
         )
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
@@ -105,9 +109,7 @@ class TenantRateLimitMiddleware(BaseHTTPMiddleware):
         try:
             count = await self._increment(tenant_id)
         except Exception as exc:
-            logger.warning(
-                "Rate limit Redis error (tenant=%s): %s", tenant_id, exc
-            )
+            logger.warning("Rate limit Redis error (tenant=%s): %s", tenant_id, exc)
             if not self._fail_open:
                 return Response(
                     content="Rate limit service temporarily unavailable",
@@ -118,28 +120,29 @@ class TenantRateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         if count > self._limit:
-            now         = int(time.time())
+            now = int(time.time())
             retry_after = str(60 - (now % 60))
-            remaining   = max(0, self._limit - count)
+            remaining = max(0, self._limit - count)
             logger.warning(
                 "Rate limit exceeded: tenant=%s count=%d limit=%d",
-                tenant_id, count, self._limit,
+                tenant_id,
+                count,
+                self._limit,
             )
             return Response(
-                content=f"Rate limit exceeded for tenant {tenant_id!r}. "
-                        f"Retry in {retry_after}s.",
+                content=f"Rate limit exceeded for tenant {tenant_id!r}. Retry in {retry_after}s.",
                 status_code=429,
                 headers={
-                    "Retry-After":           retry_after,
-                    "X-RateLimit-Limit":     str(self._limit),
+                    "Retry-After": retry_after,
+                    "X-RateLimit-Limit": str(self._limit),
                     "X-RateLimit-Remaining": str(remaining),
-                    "X-RateLimit-Reset":     str((now // 60 + 1) * 60),
+                    "X-RateLimit-Reset": str((now // 60 + 1) * 60),
                 },
             )
 
         response = await call_next(request)
         # Attach informational rate-limit headers to every passing response
-        response.headers["X-RateLimit-Limit"]     = str(self._limit)
+        response.headers["X-RateLimit-Limit"] = str(self._limit)
         response.headers["X-RateLimit-Remaining"] = str(max(0, self._limit - count))
         return response
 
@@ -163,19 +166,22 @@ class TenantRateLimitMiddleware(BaseHTTPMiddleware):
         Raises:
             Any aioredis exception on connectivity failure.
         """
-        now    = int(time.time())
-        bucket = now // 60                      # integer minute bucket
-        key    = f"rl:{tenant_id}:{bucket}"
+        now = int(time.time())
+        bucket = now // 60  # integer minute bucket
+        key = f"rl:{tenant_id}:{bucket}"
 
         pipe = self._redis.pipeline()
-        pipe.incr(key, 1)                       # atomic increment
-        pipe.expire(key, 120)                   # 2-window TTL
+        pipe.incr(key, 1)  # atomic increment
+        pipe.expire(key, 120)  # 2-window TTL
         results = await pipe.execute()
 
         count = int(results[0])
         logger.debug(
             "Rate limit counter: tenant=%s bucket=%d count=%d limit=%d",
-            tenant_id, bucket, count, self._limit,
+            tenant_id,
+            bucket,
+            count,
+            self._limit,
         )
         return count
 

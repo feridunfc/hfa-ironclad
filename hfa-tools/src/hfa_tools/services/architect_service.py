@@ -2,6 +2,7 @@
 hfa-tools/src/hfa_tools/services/architect_service.py
 IRONCLAD — Architect service that creates/modifies plans
 """
+
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -11,7 +12,9 @@ from fastapi import HTTPException
 
 from hfa.llm.robust_client import RobustLLMClient, LLMCallError
 from hfa.schemas.agent import ArchitectRequest, PlanManifest
-from hfa.core.config import settings  # NOTE: keep as-is if your config module is here; update if needed
+from hfa.core.config import (
+    settings,
+)  # NOTE: keep as-is if your config module is here; update if needed
 
 logger = logging.getLogger(__name__)
 

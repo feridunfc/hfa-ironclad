@@ -12,6 +12,7 @@ Guardian fixes applied:
   * _is_container_healthy: container.reload() before status read
   * get_container: re-validates health on checkout; dead containers removed + pool refilled
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -33,18 +34,22 @@ logger = logging.getLogger(__name__)
 # Container spec
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ContainerSpec:
     """Container specification for a language profile."""
+
     image: str
     command: str = "sleep infinity"
-    tmpfs: dict = field(default_factory=lambda: {
-        "/tmp":       "rw,noexec,nosuid,size=64m",
-        "/run":       "rw,noexec,nosuid,size=8m",
-        "/workspace": "rw,noexec,nosuid,size=128m",
-    })
+    tmpfs: dict = field(
+        default_factory=lambda: {
+            "/tmp": "rw,noexec,nosuid,size=64m",
+            "/run": "rw,noexec,nosuid,size=8m",
+            "/workspace": "rw,noexec,nosuid,size=128m",
+        }
+    )
     mem_limit: str = "256m"
-    cpu_quota: int = 50_000   # 50 % of one core
+    cpu_quota: int = 50_000  # 50 % of one core
     network_disabled: bool = True
     user: str = "nobody"
     working_dir: str = "/workspace"
@@ -53,6 +58,7 @@ class ContainerSpec:
 # ---------------------------------------------------------------------------
 # SandboxPool
 # ---------------------------------------------------------------------------
+
 
 class SandboxPool:
     """
@@ -68,7 +74,7 @@ class SandboxPool:
 
     PROFILES: dict[str, ContainerSpec] = {
         "python": ContainerSpec(image="python:3.11-slim"),
-        "node":   ContainerSpec(image="node:18-slim"),
+        "node": ContainerSpec(image="node:18-slim"),
         "python-test": ContainerSpec(
             image="python:3.11-slim",
             mem_limit="512m",
@@ -106,7 +112,8 @@ class SandboxPool:
 
         logger.info(
             "SandboxPool init: languages=%s pool_size=%d",
-            self._languages, pool_size,
+            self._languages,
+            pool_size,
         )
 
     # ------------------------------------------------------------------
@@ -115,7 +122,7 @@ class SandboxPool:
 
     async def start(self) -> None:
         """Start background warm-up and cleanup loops."""
-        self._warmup_task  = asyncio.get_running_loop().create_task(self._warmup_loop())
+        self._warmup_task = asyncio.get_running_loop().create_task(self._warmup_loop())
         self._cleanup_task = asyncio.get_running_loop().create_task(self._cleanup_loop())
         logger.info("SandboxPool started")
 
@@ -164,8 +171,7 @@ class SandboxPool:
             raise ValueError(f"Unsupported language: {language!r}")
         if language not in self._pool:
             raise ValueError(
-                f"Language {language!r} not in pool "
-                f"(available: {list(self._pool.keys())})"
+                f"Language {language!r} not in pool (available: {list(self._pool.keys())})"
             )
 
         container_id: Optional[str] = None
@@ -174,31 +180,25 @@ class SandboxPool:
             # ── checkout loop: skip dead IDs until we get a live one ──
             while True:
                 try:
-                    candidate = await asyncio.wait_for(
-                        self._pool[language].get(), timeout=5.0
-                    )
+                    candidate = await asyncio.wait_for(self._pool[language].get(), timeout=5.0)
                 except asyncio.TimeoutError:
-                    logger.warning(
-                        "Pool empty for %s — slow-path create", language
-                    )
+                    logger.warning("Pool empty for %s — slow-path create", language)
                     candidate = await self._create_container(language)
 
                 if await self._is_container_healthy(candidate):
                     container_id = candidate
                     break
                 else:
-                    logger.warning(
-                        "Stale container %s removed at checkout", candidate[:12]
-                    )
+                    logger.warning("Stale container %s removed at checkout", candidate[:12])
                     await self._remove_container(candidate)
-                    asyncio.get_running_loop().create_task(
-                        self._refill_pool(language)
-                    )
+                    asyncio.get_running_loop().create_task(self._refill_pool(language))
 
             # Fail-closed: wipe workspace to prevent cross-run/tenant data leaks
             wiped = await self._wipe_workspace(container_id)
             if not wiped:
-                logger.warning("Workspace wipe failed for %s — removing container", container_id[:12])
+                logger.warning(
+                    "Workspace wipe failed for %s — removing container", container_id[:12]
+                )
                 await self._remove_container(container_id)
                 # ✅ Guardian Fix: DO NOT await self._pool.put() here, it causes DEADLOCK if queue is full
                 container_id = await self._create_container(language)
@@ -225,13 +225,9 @@ class SandboxPool:
                             await self._remove_container(container_id)
                     else:
                         await self._remove_container(container_id)
-                        asyncio.get_running_loop().create_task(
-                            self._refill_pool(language)
-                        )
+                        asyncio.get_running_loop().create_task(self._refill_pool(language))
                 except Exception as exc:
-                    logger.error(
-                        "Error returning container %s: %s", container_id[:12], exc
-                    )
+                    logger.error("Error returning container %s: %s", container_id[:12], exc)
                     await self._remove_container(container_id)
 
     # ------------------------------------------------------------------
@@ -252,7 +248,7 @@ class SandboxPool:
                     command=spec.command,
                     name=name,
                     network_disabled=spec.network_disabled,
-                    read_only=True,          # ✅ IRONCLAD: root FS read-only
+                    read_only=True,  # ✅ IRONCLAD: root FS read-only
                     cap_drop=["ALL"],
                     security_opt=["no-new-privileges"],
                     pids_limit=128,
@@ -260,7 +256,7 @@ class SandboxPool:
                         docker.types.Ulimit(name="nofile", soft=1024, hard=2048),
                         docker.types.Ulimit(name="nproc", soft=256, hard=512),
                     ],
-                    tmpfs=spec.tmpfs,        # ✅ IRONCLAD: writable tmpfs required with read_only
+                    tmpfs=spec.tmpfs,  # ✅ IRONCLAD: writable tmpfs required with read_only
                     user=spec.user,
                     working_dir=spec.working_dir,
                     mem_limit=spec.mem_limit,
@@ -269,17 +265,17 @@ class SandboxPool:
                     detach=True,
                     remove=False,
                     labels={
-                        "hfa.managed":  "true",
+                        "hfa.managed": "true",
                         "hfa.language": language,
-                        "hfa.created":  str(time.time()),
-                        "hfa.version":  "5.3",
+                        "hfa.created": str(time.time()),
+                        "hfa.version": "5.3",
                     },
-                )
+                ),
             )
             cid = container.id
             async with self._metadata_lock:
                 self._metadata[cid] = {
-                    "language":   language,
+                    "language": language,
                     "created_at": time.time(),
                 }
             logger.info("Created %s container: %s", language, cid[:12])
@@ -295,9 +291,7 @@ class SandboxPool:
         try:
             await loop.run_in_executor(
                 None,
-                lambda: self._docker.containers.get(container_id).remove(
-                    force=True, v=True
-                ),
+                lambda: self._docker.containers.get(container_id).remove(force=True, v=True),
             )
             logger.debug("Removed container %s", container_id[:12])
         except NotFound:
@@ -311,18 +305,17 @@ class SandboxPool:
     async def _is_container_healthy(self, container_id: str) -> bool:
         loop = asyncio.get_running_loop()
         try:
+
             def _check():
                 c = self._docker.containers.get(container_id)
-                c.reload()          # ← fresh status from daemon
+                c.reload()  # ← fresh status from daemon
                 return c.status == "running"
 
             return await loop.run_in_executor(None, _check)
         except NotFound:
             return False
         except Exception as exc:
-            logger.error(
-                "Health check error for %s: %s", container_id[:12], exc
-            )
+            logger.error("Health check error for %s: %s", container_id[:12], exc)
             return False
 
     async def _wipe_workspace(self, container_id: str) -> bool:
@@ -333,12 +326,14 @@ class SandboxPool:
                 None, lambda: self._docker.containers.get(container_id)
             )
             cmd = [
-                "sh", "-lc",
-                "rm -rf /workspace/* /workspace/.[!.]* /workspace/..?* 2>/dev/null || true"
+                "sh",
+                "-lc",
+                "rm -rf /workspace/* /workspace/.[!.]* /workspace/..?* 2>/dev/null || true",
             ]
             runner = None
             try:
                 from hfa_tools.sandbox.runner import CodeRunner
+
                 runner = CodeRunner(self._docker, container_id)
                 res = await runner.run_command(cmd=cmd, timeout=5, workdir="/")
                 return bool(res.get("exit_code", 1) == 0)
@@ -354,6 +349,7 @@ class SandboxPool:
                     out = container.client.api.exec_start(exec_cfg["Id"], stream=False)
                     ins = container.client.api.exec_inspect(exec_cfg["Id"])
                     return ins.get("ExitCode", 1) == 0
+
                 return await loop.run_in_executor(None, _exec)
         except Exception as e:
             logger.error("Workspace wipe failed for %s: %s", container_id[:12], e, exc_info=True)
@@ -362,7 +358,7 @@ class SandboxPool:
     async def _refill_pool(self, language: str) -> None:
         """Top up pool to pool_size."""
         current = self._pool[language].qsize()
-        needed  = self._pool_size - current
+        needed = self._pool_size - current
         if needed <= 0:
             return
         logger.debug("Refilling %s pool: +%d containers", language, needed)
@@ -398,7 +394,8 @@ class SandboxPool:
                 threshold = now - self._container_max_age
                 async with self._metadata_lock:
                     stale = [
-                        cid for cid, meta in self._metadata.items()
+                        cid
+                        for cid, meta in self._metadata.items()
                         if meta.get("created_at", now) < threshold
                     ]
                 for cid in stale:

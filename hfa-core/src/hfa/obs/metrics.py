@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 try:
     from opentelemetry import metrics as _otel_metrics
+
     _OTEL_AVAILABLE = True
 except ImportError:
     _OTEL_AVAILABLE = False
@@ -32,6 +33,7 @@ except ImportError:
 
 class _Instruments:
     """Lazy singleton container for OTel instruments."""
+
     _instance: Optional["_Instruments"] = None
 
     def __init__(self) -> None:

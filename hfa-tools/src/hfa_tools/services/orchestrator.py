@@ -36,6 +36,7 @@ IRONCLAD rules
 * Per-tenant semaphore prevents cross-tenant starvation.
 * Monetary values: cost_cents: int (no float USD).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -46,11 +47,11 @@ from enum import Enum
 from typing import Any, Callable, Dict, Optional, Set
 
 from hfa.obs.run_graph import ExecutionGraph
-from hfa.obs.metrics import HFAMetrics              # Sprint 7 Faz 2
+from hfa.obs.metrics import HFAMetrics  # Sprint 7 Faz 2
 from hfa.obs.tracing import get_tracer, HFATracing  # Sprint 8 Mini 3
 from hfa_tools.middleware.tenant import validate_run_id_format, TenantFormatError
 
-logger  = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 _tracer = get_tracer("hfa.orchestrator")
 
 
@@ -58,21 +59,22 @@ _tracer = get_tracer("hfa.orchestrator")
 # Data types
 # ---------------------------------------------------------------------------
 
+
 class RunStatus(str, Enum):
-    QUEUED   = "queued"
-    RUNNING  = "running"
-    DONE     = "done"
-    FAILED   = "failed"
+    QUEUED = "queued"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
     REJECTED = "rejected"
 
 
 @dataclass
 class RunRequest:
-    agent_type:   str
-    tenant_id:    str
-    run_id:       str
-    payload:      Any
-    priority:     int   = 5
+    agent_type: str
+    tenant_id: str
+    run_id: str
+    payload: Any
+    priority: int = 5
     submitted_at: float = field(default_factory=time.time)
 
     def __lt__(self, other: "RunRequest") -> bool:
@@ -81,21 +83,22 @@ class RunRequest:
 
 @dataclass
 class RunResult:
-    run_id:      str
-    tenant_id:   str
-    agent_type:  str
-    status:      RunStatus
-    payload:     Optional[Any]   = None
-    error:       Optional[str]   = None
+    run_id: str
+    tenant_id: str
+    agent_type: str
+    status: RunStatus
+    payload: Optional[Any] = None
+    error: Optional[str] = None
     duration_ms: Optional[float] = None
-    graph:       Optional[Dict]  = None
-    tokens_used: int             = 0
-    cost_cents:  int             = 0    # integer cents — no float USD
+    graph: Optional[Dict] = None
+    tokens_used: int = 0
+    cost_cents: int = 0  # integer cents — no float USD
 
 
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
+
 
 class OrchestratorError(Exception):
     """Base orchestrator error."""
@@ -104,7 +107,7 @@ class OrchestratorError(Exception):
 class QueueFullError(OrchestratorError):
     def __init__(self, tenant_id: str, queue_size: int) -> None:
         super().__init__(f"Run queue full for tenant={tenant_id} (size={queue_size})")
-        self.tenant_id  = tenant_id
+        self.tenant_id = tenant_id
         self.queue_size = queue_size
 
 
@@ -120,6 +123,7 @@ class OrchestratorNotStartedError(OrchestratorError):
 # RunOrchestrator
 # ---------------------------------------------------------------------------
 
+
 class RunOrchestrator:
     """
     Bounded priority queue + worker pool orchestrator.
@@ -131,35 +135,37 @@ class RunOrchestrator:
 
     def __init__(
         self,
-        max_queue_size:          int   = 500,
-        worker_count:            int   = 8,
-        per_tenant_concurrency:  int   = 5,
+        max_queue_size: int = 500,
+        worker_count: int = 8,
+        per_tenant_concurrency: int = 5,
         worker_shutdown_timeout: float = 30.0,
-        budget_guard:            Optional[Any] = None,
-        ledger:                  Optional[Any] = None,
+        budget_guard: Optional[Any] = None,
+        ledger: Optional[Any] = None,
     ) -> None:
-        self._max_queue_size     = max_queue_size
-        self._worker_count       = worker_count
-        self._per_tenant_limit   = per_tenant_concurrency
-        self._shutdown_timeout   = worker_shutdown_timeout
-        self._budget_guard       = budget_guard
-        self._ledger             = ledger
+        self._max_queue_size = max_queue_size
+        self._worker_count = worker_count
+        self._per_tenant_limit = per_tenant_concurrency
+        self._shutdown_timeout = worker_shutdown_timeout
+        self._budget_guard = budget_guard
+        self._ledger = ledger
 
-        self._queue:             asyncio.PriorityQueue = asyncio.PriorityQueue(maxsize=max_queue_size)
-        self._dispatch_table:    Dict[str, Callable]   = {}
-        self._tenant_sems:       Dict[str, asyncio.Semaphore] = {}
-        self._sems_lock          = asyncio.Lock()
+        self._queue: asyncio.PriorityQueue = asyncio.PriorityQueue(maxsize=max_queue_size)
+        self._dispatch_table: Dict[str, Callable] = {}
+        self._tenant_sems: Dict[str, asyncio.Semaphore] = {}
+        self._sems_lock = asyncio.Lock()
 
-        self._active_graphs:     Dict[str, ExecutionGraph] = {}
-        self._results:           Dict[str, RunResult]      = {}
-        self._result_events:     Dict[str, asyncio.Event]  = {}
-        self._background_tasks:  Set[asyncio.Task]         = set()
-        self._workers:           list                       = []
-        self._running            = False
+        self._active_graphs: Dict[str, ExecutionGraph] = {}
+        self._results: Dict[str, RunResult] = {}
+        self._result_events: Dict[str, asyncio.Event] = {}
+        self._background_tasks: Set[asyncio.Task] = set()
+        self._workers: list = []
+        self._running = False
 
         logger.info(
             "RunOrchestrator created: workers=%d queue=%d per_tenant=%d budget=%s ledger=%s",
-            worker_count, max_queue_size, per_tenant_concurrency,
+            worker_count,
+            max_queue_size,
+            per_tenant_concurrency,
             "enabled" if budget_guard else "disabled",
             "enabled" if ledger else "disabled",
         )
@@ -174,9 +180,7 @@ class RunOrchestrator:
         self._running = True
         loop = asyncio.get_running_loop()
         for i in range(self._worker_count):
-            self._workers.append(
-                loop.create_task(self._worker(i), name=f"orchestrator.worker.{i}")
-            )
+            self._workers.append(loop.create_task(self._worker(i), name=f"orchestrator.worker.{i}"))
         logger.info("RunOrchestrator started: %d workers", self._worker_count)
 
     async def close(self) -> None:
@@ -203,9 +207,7 @@ class RunOrchestrator:
                 pass
 
         if self._workers:
-            done, pending = await asyncio.wait(
-                self._workers, timeout=self._shutdown_timeout
-            )
+            done, pending = await asyncio.wait(self._workers, timeout=self._shutdown_timeout)
             for t in pending:
                 t.cancel()
             await asyncio.gather(*self._workers, return_exceptions=True)
@@ -292,7 +294,10 @@ class RunOrchestrator:
 
         logger.info(
             "RunOrchestrator.enqueue: tenant=%s run=%s agent=%s qsize=%d",
-            request.tenant_id, request.run_id, request.agent_type, self._queue.qsize(),
+            request.tenant_id,
+            request.run_id,
+            request.agent_type,
+            self._queue.qsize(),
         )
         return request.run_id
 
@@ -302,9 +307,9 @@ class RunOrchestrator:
 
     async def wait_for(
         self,
-        run_id:  str,
+        run_id: str,
         timeout: float = 120.0,
-        consume: bool  = True,
+        consume: bool = True,
     ) -> RunResult:
         event = self._result_events.get(run_id)
         if event is None:
@@ -354,12 +359,15 @@ class RunOrchestrator:
         start = time.perf_counter()
 
         with _tracer.start_as_current_span("hfa.orchestrator.run") as span:
-            HFATracing.set_attrs(span, {
-                "hfa.run_id":     request.run_id,
-                "hfa.tenant_id":  request.tenant_id,
-                "hfa.agent_type": request.agent_type,
-                "hfa.worker_id":  str(worker_id),
-            })
+            HFATracing.set_attrs(
+                span,
+                {
+                    "hfa.run_id": request.run_id,
+                    "hfa.tenant_id": request.tenant_id,
+                    "hfa.agent_type": request.agent_type,
+                    "hfa.worker_id": str(worker_id),
+                },
+            )
 
             async with sem:
                 if self._budget_guard:
@@ -416,10 +424,13 @@ class RunOrchestrator:
                         tokens_used=graph.total_tokens(),
                         cost_cents=graph.total_cost_cents(),
                     )
-                    HFATracing.set_attrs(span, {
-                        "hfa.status": RunStatus.DONE.value,
-                        "hfa.duration_ms": duration_ms,
-                    })
+                    HFATracing.set_attrs(
+                        span,
+                        {
+                            "hfa.status": RunStatus.DONE.value,
+                            "hfa.duration_ms": duration_ms,
+                        },
+                    )
                     HFATracing.span_ok(span)
 
                 except Exception as exc:

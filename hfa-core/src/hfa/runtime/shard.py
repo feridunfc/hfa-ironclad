@@ -1,4 +1,5 @@
 """IRONCLAD Sprint 9 — shard ownership helpers (worker instance level)."""
+
 from __future__ import annotations
 
 import logging

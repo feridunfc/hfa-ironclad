@@ -20,6 +20,7 @@ IRONCLAD rules
 * No print() — logging only.
 * No asyncio.get_event_loop() — get_running_loop() where needed.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -43,7 +44,7 @@ def build_app(redis=None, config=None) -> FastAPI:
     """
     Factory used both by main() and by tests (pass mock redis).
     """
-    from hfa_control.service    import ControlPlaneService
+    from hfa_control.service import ControlPlaneService
     from hfa_control.api.router import router
 
     app = FastAPI(title="IRONCLAD Control Plane", version="10.0.0")
@@ -57,13 +58,14 @@ def build_app(redis=None, config=None) -> FastAPI:
         nonlocal _redis, _cp
         if _redis is None:
             import redis.asyncio as aioredis
+
             _redis = aioredis.from_url(
                 os.environ.get("REDIS_URL", "redis://localhost:6379"),
                 decode_responses=False,
             )
         _cp = ControlPlaneService(_redis, config)
         await _cp.start()
-        app.state.cp    = _cp
+        app.state.cp = _cp
         app.state.redis = _redis
         logger.info("ControlPlane FastAPI app started")
 
@@ -81,6 +83,7 @@ def build_app(redis=None, config=None) -> FastAPI:
 def main() -> None:
     try:
         import uvloop
+
         uvloop.install()
         logger.info("uvloop installed")
     except ImportError:

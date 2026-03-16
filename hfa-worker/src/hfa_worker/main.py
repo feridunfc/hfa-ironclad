@@ -14,6 +14,7 @@ Sprint 9 main.py referenced ShardConsumer / HeartbeatPublisher (old names).
 This replaces it with the Sprint 11 class names without changing any
 external contracts.
 """
+
 from __future__ import annotations
 
 import logging
@@ -102,23 +103,18 @@ class WorkerService:
     async def start(self) -> None:
         logger.info(
             "WorkerService starting: worker_id=%s group=%s shards=%s capacity=%d",
-            self._worker_id, self._worker_group, self._shards, self._capacity,
+            self._worker_id,
+            self._worker_group,
+            self._shards,
+            self._capacity,
         )
         await self._consumer.start()
         await self._heartbeat.start()
         logger.info("WorkerService started: worker_id=%s", self._worker_id)
 
-    async def graceful_shutdown(
-        self, drain_timeout: float = 30.0
-    ) -> None:
-        logger.info(
-            "WorkerService graceful_shutdown: worker_id=%s", self._worker_id
-        )
-        await self._drain_manager.start_drain(
-            reason="SIGTERM", timeout=drain_timeout
-        )
+    async def graceful_shutdown(self, drain_timeout: float = 30.0) -> None:
+        logger.info("WorkerService graceful_shutdown: worker_id=%s", self._worker_id)
+        await self._drain_manager.start_drain(reason="SIGTERM", timeout=drain_timeout)
         await self._consumer.close()
         await self._heartbeat.close()
-        logger.info(
-            "WorkerService shutdown complete: worker_id=%s", self._worker_id
-        )
+        logger.info("WorkerService shutdown complete: worker_id=%s", self._worker_id)

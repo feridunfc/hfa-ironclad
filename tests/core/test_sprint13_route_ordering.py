@@ -1,4 +1,4 @@
-﻿"""
+"""
 tests/core/test_sprint13_route_ordering.py
 IRONCLAD Sprint 13 â€” Route ordering and security matrix tests
 
@@ -13,6 +13,7 @@ Also verifies:
   - Schedulable includes inflight < capacity check (full capacity excluded)
   - Route names map to correct handler functions
 """
+
 from __future__ import annotations
 
 import sys
@@ -31,6 +32,7 @@ from fakeredis.aioredis import FakeRedis
 # Route ordering â€” verified by inspecting router route list
 # ---------------------------------------------------------------------------
 
+
 def test_workers_healthy_route_before_worker_id():
     """
     /workers/healthy must be registered before /workers/{worker_id}.
@@ -42,9 +44,7 @@ def test_workers_healthy_route_before_worker_id():
     routes = [r for r in router.routes if hasattr(r, "path")]
     paths = [r.path for r in routes]
 
-    healthy_idx = next(
-        (i for i, p in enumerate(paths) if p == "/control/v1/workers/healthy"), None
-    )
+    healthy_idx = next((i for i, p in enumerate(paths) if p == "/control/v1/workers/healthy"), None)
     schedulable_idx = next(
         (i for i, p in enumerate(paths) if p == "/control/v1/workers/schedulable"), None
     )
@@ -74,13 +74,8 @@ def test_runs_running_route_before_run_id():
     routes = [r for r in router.routes if hasattr(r, "path")]
     paths = [r.path for r in routes]
 
-    running_idx = next(
-        (i for i, p in enumerate(paths) if p == "/control/v1/runs/running"), None
-    )
-    run_id_idxs = [
-        i for i, p in enumerate(paths)
-        if p.startswith("/control/v1/runs/{run_id}")
-    ]
+    running_idx = next((i for i, p in enumerate(paths) if p == "/control/v1/runs/running"), None)
+    run_id_idxs = [i for i, p in enumerate(paths) if p.startswith("/control/v1/runs/{run_id}")]
 
     assert running_idx is not None, "/runs/running route not found"
     assert run_id_idxs, "/runs/{run_id}/... routes not found"
@@ -140,14 +135,21 @@ import time
 
 
 async def _seed(redis, wid, status="healthy", inflight=0, capacity=10):
-    from hfa_control.models import ControlPlaneConfig
-    await redis.hset(f"hfa:cp:worker:{wid}", mapping={
-        "worker_id": wid, "worker_group": f"g-{wid}",
-        "region": "us-east-1", "shards": "[]",
-        "capacity": str(capacity), "inflight": str(inflight),
-        "status": status, "last_seen": str(time.time()),
-        "version": "1.0", "capabilities": "[]",
-    })
+    await redis.hset(
+        f"hfa:cp:worker:{wid}",
+        mapping={
+            "worker_id": wid,
+            "worker_group": f"g-{wid}",
+            "region": "us-east-1",
+            "shards": "[]",
+            "capacity": str(capacity),
+            "inflight": str(inflight),
+            "status": status,
+            "last_seen": str(time.time()),
+            "version": "1.0",
+            "capabilities": "[]",
+        },
+    )
     await redis.sadd("hfa:cp:workers:by_region:us-east-1", wid)
 
 
@@ -158,12 +160,10 @@ async def test_schedulable_excludes_capacity_full():
     from hfa_control.registry import WorkerRegistry
 
     redis = FakeRedis()
-    cfg = ControlPlaneConfig(
-        instance_id="cp", worker_heartbeat_ttl=60.0, registry_ttl=120
-    )
+    cfg = ControlPlaneConfig(instance_id="cp", worker_heartbeat_ttl=60.0, registry_ttl=120)
     reg = WorkerRegistry(redis, cfg)
     await _seed(redis, "w-full", status="healthy", inflight=10, capacity=10)
-    await _seed(redis, "w-ok",   status="healthy", inflight=3,  capacity=10)
+    await _seed(redis, "w-ok", status="healthy", inflight=3, capacity=10)
 
     schedulable = await reg.list_schedulable_workers()
     ids = {w.worker_id for w in schedulable}
@@ -177,12 +177,10 @@ async def test_schedulable_excludes_draining():
     from hfa_control.registry import WorkerRegistry
 
     redis = FakeRedis()
-    cfg = ControlPlaneConfig(
-        instance_id="cp", worker_heartbeat_ttl=60.0, registry_ttl=120
-    )
+    cfg = ControlPlaneConfig(instance_id="cp", worker_heartbeat_ttl=60.0, registry_ttl=120)
     reg = WorkerRegistry(redis, cfg)
     await _seed(redis, "w-drain", status="draining", inflight=0, capacity=10)
-    await _seed(redis, "w-ok",    status="healthy",  inflight=0, capacity=10)
+    await _seed(redis, "w-ok", status="healthy", inflight=0, capacity=10)
 
     schedulable = await reg.list_schedulable_workers()
     ids = {w.worker_id for w in schedulable}
@@ -196,11 +194,9 @@ async def test_schedulable_empty_when_all_full_or_draining():
     from hfa_control.registry import WorkerRegistry
 
     redis = FakeRedis()
-    cfg = ControlPlaneConfig(
-        instance_id="cp", worker_heartbeat_ttl=60.0, registry_ttl=120
-    )
+    cfg = ControlPlaneConfig(instance_id="cp", worker_heartbeat_ttl=60.0, registry_ttl=120)
     reg = WorkerRegistry(redis, cfg)
-    await _seed(redis, "w-full",  status="healthy",  inflight=5, capacity=5)
+    await _seed(redis, "w-full", status="healthy", inflight=5, capacity=5)
     await _seed(redis, "w-drain", status="draining", inflight=0, capacity=10)
 
     schedulable = await reg.list_schedulable_workers()
@@ -213,9 +209,7 @@ async def test_schedulable_includes_partially_loaded():
     from hfa_control.registry import WorkerRegistry
 
     redis = FakeRedis()
-    cfg = ControlPlaneConfig(
-        instance_id="cp", worker_heartbeat_ttl=60.0, registry_ttl=120
-    )
+    cfg = ControlPlaneConfig(instance_id="cp", worker_heartbeat_ttl=60.0, registry_ttl=120)
     reg = WorkerRegistry(redis, cfg)
     # inflight=9, capacity=10 â†’ 1 available slot â†’ still schedulable
     await _seed(redis, "w-near-full", status="healthy", inflight=9, capacity=10)
@@ -228,6 +222,7 @@ async def test_schedulable_includes_partially_loaded():
 # ---------------------------------------------------------------------------
 # Security matrix â€” route handler names indicate correct auth gates
 # ---------------------------------------------------------------------------
+
 
 def test_operator_routes_use_require_operator():
     """
@@ -252,8 +247,7 @@ def test_operator_routes_use_require_operator():
         assert fn is not None, f"Handler {name!r} not found in router"
         src = inspect.getsource(fn)
         assert "_require_operator" in src, (
-            f"Handler {name!r} does not call _require_operator â€” "
-            "it should be operator-only"
+            f"Handler {name!r} does not call _require_operator â€” it should be operator-only"
         )
 
 
@@ -272,9 +266,7 @@ def test_public_routes_no_auth():
         assert "_require_operator" not in src, (
             f"Public probe {name!r} must not require operator auth"
         )
-        assert "_tenant_header" not in src, (
-            f"Public probe {name!r} must not require tenant header"
-        )
+        assert "_tenant_header" not in src, f"Public probe {name!r} must not require tenant header"
 
 
 def test_tenant_routes_use_tenant_header():

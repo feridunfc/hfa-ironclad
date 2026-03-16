@@ -2,6 +2,7 @@
 hfa-worker/src/hfa_worker/idempotency.py
 IRONCLAD Sprint 11 --- Idempotency Guard with Atomic Claims
 """
+
 from __future__ import annotations
 
 import logging

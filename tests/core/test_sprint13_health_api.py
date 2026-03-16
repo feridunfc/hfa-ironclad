@@ -11,6 +11,7 @@ Covers:
   - get_readiness degrades when dependency unavailable
   - ReadyCheckDetail per-check fields
 """
+
 from __future__ import annotations
 
 import sys
@@ -38,8 +39,10 @@ def _make_service(redis, instance_id="cp-test"):
     from hfa_control.recovery import RecoveryService
 
     cfg = ControlPlaneConfig(
-        instance_id=instance_id, region="us-east-1",
-        worker_heartbeat_ttl=60.0, registry_ttl=120,
+        instance_id=instance_id,
+        region="us-east-1",
+        worker_heartbeat_ttl=60.0,
+        registry_ttl=120,
     )
     svc = object.__new__(ControlPlaneService)
     svc._redis = redis
@@ -60,6 +63,7 @@ def _make_service(redis, instance_id="cp-test"):
 # LiveResponse model
 # ---------------------------------------------------------------------------
 
+
 def test_live_response_model():
     r = LiveResponse(status="alive", service="hfa-control", instance_id="cp-1")
     assert r.status == "alive"
@@ -71,14 +75,17 @@ def test_live_response_model():
 # ReadyResponse model
 # ---------------------------------------------------------------------------
 
+
 def test_ready_response_model():
     checks = {
         "redis": ReadyCheckDetail(ok=True),
         "control_stream": ReadyCheckDetail(ok=True),
     }
     r = ReadyResponse(
-        status="ready", instance_id="cp-1",
-        is_leader=True, checks=checks,
+        status="ready",
+        instance_id="cp-1",
+        is_leader=True,
+        checks=checks,
     )
     assert r.status == "ready"
     assert r.checks["redis"].ok is True
@@ -93,6 +100,7 @@ def test_ready_check_detail_with_message():
 # ---------------------------------------------------------------------------
 # get_liveness
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_get_liveness_returns_alive():
@@ -117,6 +125,7 @@ async def test_get_liveness_always_returns():
 # ---------------------------------------------------------------------------
 # get_readiness
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_get_readiness_ready_when_redis_ok():

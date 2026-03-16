@@ -1,4 +1,4 @@
-﻿"""
+"""
 hfa-tools/src/hfa_tools/api/inspector.py
 IRONCLAD Sprint 7 â€” Run Inspector API (Sprint 6 â†’ Sprint 7 upgrade)
 
@@ -70,6 +70,7 @@ Sprint 8 Mini 3 (Tracing)
   âœ… hfa.archived attribute: "true"/"false" in both lookup and stream spans
   âœ… Tracing never blocks or breaks business logic (no-op safe)
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -83,8 +84,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from hfa.obs.run_graph import ExecutionGraph, NodeStatus
-from hfa.obs.tracing import get_tracer, HFATracing   # Sprint 8 Mini 3
-logger  = logging.getLogger(__name__)
+from hfa.obs.tracing import get_tracer, HFATracing  # Sprint 8 Mini 3
+
+logger = logging.getLogger(__name__)
 _tracer = get_tracer("hfa.inspector")
 
 router = APIRouter(prefix="/v1/inspector", tags=["inspector"])
@@ -95,53 +97,54 @@ router = APIRouter(prefix="/v1/inspector", tags=["inspector"])
 # (Sprint 7 additions: GraphSummaryResponse.created_at, RunListItem.created_at)
 # ---------------------------------------------------------------------------
 
+
 class NodeResponse(BaseModel):
-    node_id:     str
-    agent_type:  str
-    status:      str
-    depth:       int
-    parent_ids:  List[str]
-    started_at:  Optional[float]
+    node_id: str
+    agent_type: str
+    status: str
+    depth: int
+    parent_ids: List[str]
+    started_at: Optional[float]
     finished_at: Optional[float]
     duration_ms: Optional[float]
     tokens_used: int
-    cost_cents:  int              # integer cents â€” no float USD
-    error:       Optional[str]
-    input_hash:  Optional[str]
+    cost_cents: int  # integer cents â€” no float USD
+    error: Optional[str]
+    input_hash: Optional[str]
     output_hash: Optional[str]
-    metadata:    Dict[str, Any]
+    metadata: Dict[str, Any]
 
 
 class GraphSummaryResponse(BaseModel):
-    run_id:           str
-    tenant_id:        str
-    created_at:       float       # âœ… Sprint 7: timestamp for correct sort order
-    total_nodes:      int
-    done:             int
-    failed:           int
-    running:          int
-    pending:          int
-    total_tokens:     int
+    run_id: str
+    tenant_id: str
+    created_at: float  # âœ… Sprint 7: timestamp for correct sort order
+    total_nodes: int
+    done: int
+    failed: int
+    running: int
+    pending: int
+    total_tokens: int
     total_cost_cents: int
-    is_complete:      bool
-    has_failures:     bool
+    is_complete: bool
+    has_failures: bool
 
 
 class GraphResponse(BaseModel):
-    run_id:    str
+    run_id: str
     tenant_id: str
-    nodes:     List[NodeResponse]
-    edges:     Dict[str, List[str]]
-    summary:   GraphSummaryResponse
+    nodes: List[NodeResponse]
+    edges: Dict[str, List[str]]
+    summary: GraphSummaryResponse
 
 
 class RunListItem(BaseModel):
-    run_id:       str
-    created_at:   float           # âœ… Sprint 7: for time-ordered tenant list
-    is_complete:  bool
+    run_id: str
+    created_at: float  # âœ… Sprint 7: for time-ordered tenant list
+    is_complete: bool
     has_failures: bool
-    total_nodes:  int
-    running:      int
+    total_nodes: int
+    running: int
 
 
 # ---------------------------------------------------------------------------
@@ -150,18 +153,28 @@ class RunListItem(BaseModel):
 
 # Every summary dict â€” regardless of source (live ExecutionGraph or Redis-archived
 # JSON blob) â€” must contain at least these fields after _normalize_summary().
-SUMMARY_REQUIRED_FIELDS: frozenset = frozenset({
-    "run_id", "tenant_id", "created_at",
-    "total_nodes", "done", "failed", "running", "pending",
-    "total_tokens", "total_cost_cents",
-    "is_complete", "has_failures",
-})
+SUMMARY_REQUIRED_FIELDS: frozenset = frozenset(
+    {
+        "run_id",
+        "tenant_id",
+        "created_at",
+        "total_nodes",
+        "done",
+        "failed",
+        "running",
+        "pending",
+        "total_tokens",
+        "total_cost_cents",
+        "is_complete",
+        "has_failures",
+    }
+)
 
 
 def _normalize_summary(
-    raw:        Dict[str, Any],
-    run_id:     str,
-    tenant_id:  str,
+    raw: Dict[str, Any],
+    run_id: str,
+    tenant_id: str,
     created_at: Optional[float],
 ) -> Dict[str, Any]:
     """
@@ -185,24 +198,25 @@ def _normalize_summary(
             run_id,
         )
     return {
-        "run_id":           run_id,
-        "tenant_id":        tenant_id,
-        "created_at":       resolved_ts,
-        "total_nodes":      raw.get("total_nodes", 0),
-        "done":             raw.get("done", 0),
-        "failed":           raw.get("failed", 0),
-        "running":          raw.get("running", 0),
-        "pending":          raw.get("pending", 0),
-        "total_tokens":     raw.get("total_tokens", 0),
+        "run_id": run_id,
+        "tenant_id": tenant_id,
+        "created_at": resolved_ts,
+        "total_nodes": raw.get("total_nodes", 0),
+        "done": raw.get("done", 0),
+        "failed": raw.get("failed", 0),
+        "running": raw.get("running", 0),
+        "pending": raw.get("pending", 0),
+        "total_tokens": raw.get("total_tokens", 0),
         "total_cost_cents": raw.get("total_cost_cents", 0),
-        "is_complete":      raw.get("is_complete", False),
-        "has_failures":     raw.get("has_failures", False),
+        "is_complete": raw.get("is_complete", False),
+        "has_failures": raw.get("has_failures", False),
     }
 
 
 # ---------------------------------------------------------------------------
 # RunRegistry
 # ---------------------------------------------------------------------------
+
 
 class RunRegistry:
     """
@@ -237,19 +251,19 @@ class RunRegistry:
 
     def __init__(
         self,
-        graphs:               Optional[Dict[str, ExecutionGraph]] = None,
-        max_age:              float = 3600.0,
-        cleanup_interval:     float = 300.0,
-        redis_client:         Optional[Any] = None,
-        history_ttl_seconds:  int = 604_800,    # 7 days
+        graphs: Optional[Dict[str, ExecutionGraph]] = None,
+        max_age: float = 3600.0,
+        cleanup_interval: float = 300.0,
+        redis_client: Optional[Any] = None,
+        history_ttl_seconds: int = 604_800,  # 7 days
     ) -> None:
-        self._graphs:       Dict[str, ExecutionGraph] = graphs if graphs is not None else {}
-        self._max_age       = max_age
-        self._interval      = cleanup_interval
-        self._redis         = redis_client
-        self._history_ttl   = history_ttl_seconds
-        self._added_at:     Dict[str, float] = {}
-        self._lock          = asyncio.Lock()
+        self._graphs: Dict[str, ExecutionGraph] = graphs if graphs is not None else {}
+        self._max_age = max_age
+        self._interval = cleanup_interval
+        self._redis = redis_client
+        self._history_ttl = history_ttl_seconds
+        self._added_at: Dict[str, float] = {}
+        self._lock = asyncio.Lock()
         self._cleanup_task: Optional[asyncio.Task] = None
         logger.info(
             "RunRegistry init: redis=%s max_age=%.0fs history_ttl=%ds",
@@ -287,7 +301,7 @@ class RunRegistry:
     async def register(self, graph: ExecutionGraph) -> None:
         """Register a live ExecutionGraph (called by RunOrchestrator)."""
         async with self._lock:
-            self._graphs[graph.run_id]   = graph
+            self._graphs[graph.run_id] = graph
             self._added_at[graph.run_id] = time.time()
 
     # ------------------------------------------------------------------
@@ -318,11 +332,9 @@ class RunRegistry:
         # 1. RAM hit â€” always wins
         g = self._graphs.get(run_id)
         if g is not None:
-            created_at      = self._added_at.get(run_id, time.time())
-            snap            = g.snapshot()
-            snap["summary"] = _normalize_summary(
-                snap["summary"], run_id, g.tenant_id, created_at
-            )
+            created_at = self._added_at.get(run_id, time.time())
+            snap = g.snapshot()
+            snap["summary"] = _normalize_summary(snap["summary"], run_id, g.tenant_id, created_at)
             return snap
 
         # 2. Redis fallback
@@ -331,10 +343,8 @@ class RunRegistry:
             try:
                 raw = await self._redis.get(f"{self._KEY_PREFIX}{run_id}")
             except Exception as exc:
-                logger.error(
-                    "RunRegistry.get_snapshot redis error run=%s: %s", run_id, exc
-                )
-                return None   # Redis unavailable â†’ treat as not-found
+                logger.error("RunRegistry.get_snapshot redis error run=%s: %s", run_id, exc)
+                return None  # Redis unavailable â†’ treat as not-found
 
             if raw is not None:
                 try:
@@ -343,17 +353,17 @@ class RunRegistry:
                 except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                     logger.error(
                         "RunRegistry.get_snapshot JSON decode error run=%s: %s",
-                        run_id, exc,
+                        run_id,
+                        exc,
                     )
-                    return None   # Corrupt entry â†’ treat as not-found
+                    return None  # Corrupt entry â†’ treat as not-found
 
         return None
-
 
     async def get_tenant_run_summaries(
         self,
         tenant_id: str,
-        limit:     int = 50,
+        limit: int = 50,
     ) -> List[Dict[str, Any]]:
         """
         Merge active (RAM) + historical (Redis) summaries for a tenant.
@@ -367,7 +377,7 @@ class RunRegistry:
         active: Dict[str, Dict] = {}
         for g in self._graphs.values():
             if g.tenant_id == tenant_id:
-                ca            = self._added_at.get(g.run_id, time.time())
+                ca = self._added_at.get(g.run_id, time.time())
                 active[g.run_id] = _normalize_summary(
                     g.snapshot()["summary"], g.run_id, tenant_id, ca
                 )
@@ -376,9 +386,7 @@ class RunRegistry:
         historical: Dict[str, Dict] = {}
         if self._redis is not None:
             try:
-                rids = await self._redis.zrevrange(
-                    f"{self._IDX_PREFIX}{tenant_id}", 0, limit - 1
-                )
+                rids = await self._redis.zrevrange(f"{self._IDX_PREFIX}{tenant_id}", 0, limit - 1)
                 if rids:
                     keys = [
                         f"{self._KEY_PREFIX}{r.decode() if isinstance(r, bytes) else r}"
@@ -389,20 +397,18 @@ class RunRegistry:
                         if raw is None:
                             continue
                         snap = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
-                        rid  = (
-                            snap.get("run_id")
-                            or snap.get("summary", {}).get("run_id")
-                        )
+                        rid = snap.get("run_id") or snap.get("summary", {}).get("run_id")
                         if rid and rid not in active:
                             historical[rid] = snap.get("summary", snap)
             except Exception as exc:
                 logger.error(
                     "RunRegistry.get_tenant_run_summaries redis error tenant=%s: %s",
-                    tenant_id, exc,
+                    tenant_id,
+                    exc,
                 )
                 # Degrade: return RAM-only below
 
-        merged = {**historical, **active}   # active wins over historical
+        merged = {**historical, **active}  # active wins over historical
         return sorted(
             list(merged.values()),
             key=lambda s: s.get("created_at", 0.0),
@@ -440,32 +446,34 @@ class RunRegistry:
             None from get_snapshot() which the endpoint surfaces as 404.
         """
         if self._redis is None:
-            return True   # memory-only mode: nothing to do, not a failure
+            return True  # memory-only mode: nothing to do, not a failure
 
-        snap            = graph.snapshot()
+        snap = graph.snapshot()
         snap["summary"] = _normalize_summary(
             snap["summary"], graph.run_id, graph.tenant_id, created_at
         )
 
-        key     = f"{self._KEY_PREFIX}{graph.run_id}"
+        key = f"{self._KEY_PREFIX}{graph.run_id}"
         idx_key = f"{self._IDX_PREFIX}{graph.tenant_id}"
         payload = json.dumps(snap)
 
         try:
             async with self._redis.pipeline(transaction=True) as pipe:
-                pipe.set(key, payload, ex=self._history_ttl)       # TTL on every key
-                pipe.zadd(idx_key, {graph.run_id: created_at})     # score = timestamp
+                pipe.set(key, payload, ex=self._history_ttl)  # TTL on every key
+                pipe.zadd(idx_key, {graph.run_id: created_at})  # score = timestamp
                 await pipe.execute()
             logger.info(
                 "RunRegistry archived: run=%s tenant=%s ttl=%ds",
-                graph.run_id, graph.tenant_id, self._history_ttl,
+                graph.run_id,
+                graph.tenant_id,
+                self._history_ttl,
             )
             return True
         except Exception as exc:
             logger.error(
-                "RunRegistry._archive_run FAILED run=%s "
-                "(stays in RAM until next cycle): %s",
-                graph.run_id, exc,
+                "RunRegistry._archive_run FAILED run=%s (stays in RAM until next cycle): %s",
+                graph.run_id,
+                exc,
             )
             return False
 
@@ -473,7 +481,7 @@ class RunRegistry:
         while True:
             try:
                 await asyncio.sleep(self._interval)
-                now   = time.time()
+                now = time.time()
                 stale = []
                 async with self._lock:
                     for rid, added in list(self._added_at.items()):
@@ -508,6 +516,7 @@ class RunRegistry:
 # Dependency helpers
 # ---------------------------------------------------------------------------
 
+
 def _get_registry(request: Request) -> RunRegistry:
     registry = getattr(request.app.state, "run_registry", None)
     if registry is None:
@@ -516,8 +525,8 @@ def _get_registry(request: Request) -> RunRegistry:
 
 
 async def _require_snapshot(
-    registry:  RunRegistry,
-    run_id:    str,
+    registry: RunRegistry,
+    run_id: str,
     tenant_id: str,
 ) -> Dict[str, Any]:
     """
@@ -542,23 +551,24 @@ def _require_tenant(x_tenant_id: Optional[str]) -> str:
 # Response builders
 # ---------------------------------------------------------------------------
 
+
 def _node_resp(node) -> NodeResponse:
     """Build NodeResponse from GraphNode object."""
     return NodeResponse(
-        node_id     = node.node_id,
-        agent_type  = node.agent_type,
-        status      = node.status.value,
-        depth       = node.depth,
-        parent_ids  = node.parent_ids,
-        started_at  = node.started_at,
-        finished_at = node.finished_at,
-        duration_ms = node.duration_ms,
-        tokens_used = node.tokens_used,
-        cost_cents  = node.cost_cents,
-        error       = node.error,
-        input_hash  = node.input_hash,
-        output_hash = node.output_hash,
-        metadata    = node.metadata,
+        node_id=node.node_id,
+        agent_type=node.agent_type,
+        status=node.status.value,
+        depth=node.depth,
+        parent_ids=node.parent_ids,
+        started_at=node.started_at,
+        finished_at=node.finished_at,
+        duration_ms=node.duration_ms,
+        tokens_used=node.tokens_used,
+        cost_cents=node.cost_cents,
+        error=node.error,
+        input_hash=node.input_hash,
+        output_hash=node.output_hash,
+        metadata=node.metadata,
     )
 
 
@@ -571,11 +581,11 @@ def _graph_resp_from_snap(snap: Dict[str, Any]) -> GraphResponse:
         except Exception as exc:
             logger.warning("NodeResponse parse error (skipped): %s", exc)
     return GraphResponse(
-        run_id    = snap["run_id"],
-        tenant_id = snap["tenant_id"],
-        nodes     = nodes,
-        edges     = {k: list(v) for k, v in snap.get("edges", {}).items()},
-        summary   = GraphSummaryResponse(**snap["summary"]),
+        run_id=snap["run_id"],
+        tenant_id=snap["tenant_id"],
+        nodes=nodes,
+        edges={k: list(v) for k, v in snap.get("edges", {}).items()},
+        summary=GraphSummaryResponse(**snap["summary"]),
     )
 
 
@@ -583,27 +593,34 @@ def _graph_resp_from_snap(snap: Dict[str, Any]) -> GraphResponse:
 # Endpoints  (Sprint 7: async _require_snapshot; Sprint 8 Mini 3: tracing)
 # ---------------------------------------------------------------------------
 
+
 @router.get("/runs/{run_id}", response_model=GraphResponse)
 async def get_run_graph(
-    run_id:      str,
-    request:     Request,
+    run_id: str,
+    request: Request,
     x_tenant_id: Optional[str] = Header(None),
 ) -> GraphResponse:
     """Full graph snapshot â€” live or archived. 404/403/400 as appropriate."""
     tenant_id = _require_tenant(x_tenant_id)
-    registry  = _get_registry(request)
+    registry = _get_registry(request)
 
     with _tracer.start_as_current_span("hfa.inspector.snapshot_lookup") as span:
-        HFATracing.set_attrs(span, {
-            "hfa.run_id":    run_id,
-            "hfa.tenant_id": tenant_id,
-            "hfa.endpoint":  "get_run_graph",
-        })
+        HFATracing.set_attrs(
+            span,
+            {
+                "hfa.run_id": run_id,
+                "hfa.tenant_id": tenant_id,
+                "hfa.endpoint": "get_run_graph",
+            },
+        )
         try:
             snap = await _require_snapshot(registry, run_id, tenant_id)
-            HFATracing.set_attrs(span, {
-                "hfa.archived": str(registry.get_live_graph(run_id) is None).lower(),
-            })
+            HFATracing.set_attrs(
+                span,
+                {
+                    "hfa.archived": str(registry.get_live_graph(run_id) is None).lower(),
+                },
+            )
             HFATracing.span_ok(span)
             return _graph_resp_from_snap(snap)
         except Exception as exc:
@@ -613,15 +630,15 @@ async def get_run_graph(
 
 @router.get("/runs/{run_id}/nodes", response_model=List[NodeResponse])
 async def get_run_nodes(
-    run_id:      str,
-    request:     Request,
-    status:      Optional[str] = Query(None),
+    run_id: str,
+    request: Request,
+    status: Optional[str] = Query(None),
     x_tenant_id: Optional[str] = Header(None),
 ) -> List[NodeResponse]:
     """Flat node list, optionally filtered by status."""
     tenant_id = _require_tenant(x_tenant_id)
-    registry  = _get_registry(request)
-    snap      = await _require_snapshot(registry, run_id, tenant_id)
+    registry = _get_registry(request)
+    snap = await _require_snapshot(registry, run_id, tenant_id)
 
     nodes = []
     for nd in snap.get("nodes", []):
@@ -641,20 +658,23 @@ async def get_run_nodes(
 
 @router.get("/runs/{run_id}/summary", response_model=GraphSummaryResponse)
 async def get_run_summary(
-    run_id:      str,
-    request:     Request,
+    run_id: str,
+    request: Request,
     x_tenant_id: Optional[str] = Header(None),
 ) -> GraphSummaryResponse:
     """Lightweight summary â€” designed for fast polling (<5 ms)."""
     tenant_id = _require_tenant(x_tenant_id)
-    registry  = _get_registry(request)
+    registry = _get_registry(request)
 
     with _tracer.start_as_current_span("hfa.inspector.snapshot_lookup") as span:
-        HFATracing.set_attrs(span, {
-            "hfa.run_id":    run_id,
-            "hfa.tenant_id": tenant_id,
-            "hfa.endpoint":  "get_run_summary",
-        })
+        HFATracing.set_attrs(
+            span,
+            {
+                "hfa.run_id": run_id,
+                "hfa.tenant_id": tenant_id,
+                "hfa.endpoint": "get_run_summary",
+            },
+        )
         try:
             snap = await _require_snapshot(registry, run_id, tenant_id)
             HFATracing.span_ok(span)
@@ -666,9 +686,9 @@ async def get_run_summary(
 
 @router.get("/tenants/{tenant_id}/runs", response_model=List[RunListItem])
 async def list_tenant_runs(
-    tenant_id:   str,
-    request:     Request,
-    limit:       int = Query(50, ge=1, le=200),
+    tenant_id: str,
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
     x_tenant_id: Optional[str] = Header(None),
 ) -> List[RunListItem]:
     """Active + historical runs for a tenant, newest first."""
@@ -679,10 +699,13 @@ async def list_tenant_runs(
     registry = _get_registry(request)
 
     with _tracer.start_as_current_span("hfa.inspector.snapshot_lookup") as span:
-        HFATracing.set_attrs(span, {
-            "hfa.tenant_id": tenant_id,
-            "hfa.endpoint":  "list_tenant_runs",
-        })
+        HFATracing.set_attrs(
+            span,
+            {
+                "hfa.tenant_id": tenant_id,
+                "hfa.endpoint": "list_tenant_runs",
+            },
+        )
         try:
             summaries = await registry.get_tenant_run_summaries(tenant_id, limit=limit)
             HFATracing.set_attrs(span, {"hfa.result_count": len(summaries)})
@@ -693,22 +716,23 @@ async def list_tenant_runs(
 
     return [
         RunListItem(
-            run_id       = s["run_id"],
-            created_at   = s.get("created_at", 0.0),
-            is_complete  = s.get("is_complete", False),
-            has_failures = s.get("has_failures", False),
-            total_nodes  = s.get("total_nodes", 0),
-            running      = s.get("running", 0),
+            run_id=s["run_id"],
+            created_at=s.get("created_at", 0.0),
+            is_complete=s.get("is_complete", False),
+            has_failures=s.get("has_failures", False),
+            total_nodes=s.get("total_nodes", 0),
+            running=s.get("running", 0),
         )
         for s in summaries
     ]
 
+
 @router.get("/runs/{run_id}/events")
 async def stream_run_events(
-        run_id: str,
-        request: Request,
-        x_tenant_id: Optional[str] = Header(None),
-        interval_ms: int = Query(500, ge=100, le=5000),
+    run_id: str,
+    request: Request,
+    x_tenant_id: Optional[str] = Header(None),
+    interval_ms: int = Query(500, ge=100, le=5000),
 ) -> StreamingResponse:
     tenant_id = _require_tenant(x_tenant_id)
     registry = _get_registry(request)
@@ -775,10 +799,7 @@ async def stream_run_events(
                     last_yield_ts = now
 
                 if summary["is_complete"]:
-                    yield (
-                        f"event: complete\n"
-                        f"data: {summary_json}\n\n"
-                    )
+                    yield (f"event: complete\ndata: {summary_json}\n\n")
                     break
 
                 await asyncio.sleep(interval_ms / 1000)
@@ -797,5 +818,3 @@ async def stream_run_events(
             "Access-Control-Allow-Origin": "*",
         },
     )
-
-

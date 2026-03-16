@@ -8,9 +8,9 @@ Verifies service-layer methods that underpin all Sprint 13 API endpoints:
   - list_running_runs / get_run_state / get_run_claim / get_run_result
   - list_stale_runs / get_recovery_summary / list_dlq
 """
+
 from __future__ import annotations
 
-import json
 import sys
 import time
 from pathlib import Path
@@ -23,7 +23,7 @@ from fakeredis.aioredis import FakeRedis
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "hfa-core" / "src"))
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "hfa-control" / "src"))
 
-from hfa_control.models import ControlPlaneConfig, WorkerStatus
+from hfa_control.models import ControlPlaneConfig
 from hfa_control.registry import WorkerRegistry
 from hfa_control.recovery import RecoveryService
 from hfa_control.service import ControlPlaneService
@@ -32,6 +32,7 @@ from hfa_control.service import ControlPlaneService
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_config(**kw) -> ControlPlaneConfig:
     defaults = dict(
@@ -47,27 +48,47 @@ def _make_config(**kw) -> ControlPlaneConfig:
     return ControlPlaneConfig(**defaults)
 
 
-async def _seed_worker(redis, wid: str, status: str = "healthy",
-                       inflight: int = 0, capacity: int = 10) -> None:
-    await redis.hset(f"hfa:cp:worker:{wid}", mapping={
-        "worker_id": wid, "worker_group": f"grp-{wid}", "region": "us-east-1",
-        "shards": "[]", "capacity": str(capacity), "inflight": str(inflight),
-        "status": status, "last_seen": str(time.time()),
-        "version": "1.0", "capabilities": "[]",
-    })
+async def _seed_worker(
+    redis, wid: str, status: str = "healthy", inflight: int = 0, capacity: int = 10
+) -> None:
+    await redis.hset(
+        f"hfa:cp:worker:{wid}",
+        mapping={
+            "worker_id": wid,
+            "worker_group": f"grp-{wid}",
+            "region": "us-east-1",
+            "shards": "[]",
+            "capacity": str(capacity),
+            "inflight": str(inflight),
+            "status": status,
+            "last_seen": str(time.time()),
+            "version": "1.0",
+            "capabilities": "[]",
+        },
+    )
     await redis.sadd("hfa:cp:workers:by_region:us-east-1", wid)
 
 
-async def _seed_run(redis, run_id: str, state: str = "running",
-                    tenant_id: str = "t1", age: float = 10.0) -> None:
+async def _seed_run(
+    redis, run_id: str, state: str = "running", tenant_id: str = "t1", age: float = 10.0
+) -> None:
     from hfa.runtime.state_store import StateStore
+
     store = StateStore(redis)
     admitted = time.time() - age
-    await store.create_run_meta(run_id, {
-        "run_id": run_id, "tenant_id": tenant_id, "agent_type": "base",
-        "worker_group": "grp-w1", "shard": "0",
-        "reschedule_count": "0", "admitted_at": str(admitted), "state": state,
-    })
+    await store.create_run_meta(
+        run_id,
+        {
+            "run_id": run_id,
+            "tenant_id": tenant_id,
+            "agent_type": "base",
+            "worker_group": "grp-w1",
+            "shard": "0",
+            "reschedule_count": "0",
+            "admitted_at": str(admitted),
+            "state": state,
+        },
+    )
     await redis.set(f"hfa:run:state:{run_id}", state, ex=86400)
     if state == "running":
         await redis.zadd("hfa:cp:running", {run_id: admitted})
@@ -76,6 +97,7 @@ async def _seed_run(redis, run_id: str, state: str = "running",
 # ---------------------------------------------------------------------------
 # Liveness
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_get_liveness_returns_alive():
@@ -92,6 +114,7 @@ async def test_get_liveness_returns_alive():
 # ---------------------------------------------------------------------------
 # Readiness
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_get_readiness_ready_when_redis_ok():
@@ -116,6 +139,7 @@ async def test_get_readiness_reports_leader_flag():
 # ---------------------------------------------------------------------------
 # Worker queries
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_list_all_workers_includes_draining():
@@ -166,6 +190,7 @@ async def test_get_worker_returns_profile():
 @pytest.mark.asyncio
 async def test_get_worker_raises_on_missing():
     from hfa_control.exceptions import WorkerNotFoundError
+
     redis = FakeRedis()
     svc = _make_service(redis, _make_config())
     with pytest.raises(WorkerNotFoundError):
@@ -175,6 +200,7 @@ async def test_get_worker_raises_on_missing():
 # ---------------------------------------------------------------------------
 # Run queries
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_list_running_runs_returns_entries():
@@ -216,6 +242,7 @@ async def test_get_run_state_unknown_for_missing():
 @pytest.mark.asyncio
 async def test_get_run_claim_returns_owner():
     from hfa.runtime.state_store import StateStore
+
     redis = FakeRedis()
     store = StateStore(redis)
     await store.claim_execution("r1", "w1")
@@ -238,6 +265,7 @@ async def test_get_run_claim_unclaimed():
 @pytest.mark.asyncio
 async def test_get_run_result_returns_result():
     from hfa.runtime.state_store import StateStore
+
     redis = FakeRedis()
     store = StateStore(redis)
     await store.store_result("r1", "t1", "done", {"out": 1}, cost_cents=5, tokens_used=10)
@@ -258,6 +286,7 @@ async def test_get_run_result_none_for_missing():
 # ---------------------------------------------------------------------------
 # Recovery queries
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_list_stale_runs_detects_stale():
@@ -311,13 +340,18 @@ async def test_list_dlq_returns_entries():
     redis = FakeRedis()
     cfg = _make_config()
     # Seed a DLQ entry directly
-    await redis.hset("hfa:cp:dlq:meta:r-dlq-1", mapping={
-        "run_id": "r-dlq-1", "tenant_id": "t1",
-        "reason": "max_reschedule_exceeded",
-        "reschedule_count": "3",
-        "dead_lettered_at": str(time.time()),
-        "original_error": "", "cost_cents": "0",
-    })
+    await redis.hset(
+        "hfa:cp:dlq:meta:r-dlq-1",
+        mapping={
+            "run_id": "r-dlq-1",
+            "tenant_id": "t1",
+            "reason": "max_reschedule_exceeded",
+            "reschedule_count": "3",
+            "dead_lettered_at": str(time.time()),
+            "original_error": "",
+            "cost_cents": "0",
+        },
+    )
     svc = _make_service(redis, cfg)
     entries = await svc.list_dlq(tenant_id="", limit=50)
     ids = {e["run_id"] for e in entries}
@@ -335,18 +369,26 @@ async def test_list_dlq_empty_when_none():
 # Backward compatibility
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_service_preserves_worker_profile_backward_compat():
     """WorkerProfile from_redis_hash with missing fields uses safe defaults."""
     redis = FakeRedis()
     cfg = _make_config()
     # Seed a minimal worker hash (missing capabilities, version)
-    await redis.hset("hfa:cp:worker:w-minimal", mapping={
-        "worker_id": "w-minimal", "worker_group": "grp",
-        "region": "us-east-1", "capacity": "5", "inflight": "0",
-        "status": "healthy", "last_seen": str(time.time()),
-        "shards": "[]",
-    })
+    await redis.hset(
+        "hfa:cp:worker:w-minimal",
+        mapping={
+            "worker_id": "w-minimal",
+            "worker_group": "grp",
+            "region": "us-east-1",
+            "capacity": "5",
+            "inflight": "0",
+            "status": "healthy",
+            "last_seen": str(time.time()),
+            "shards": "[]",
+        },
+    )
     await redis.sadd("hfa:cp:workers:by_region:us-east-1", "w-minimal")
     svc = _make_service(redis, cfg)
     workers = await svc.list_all_workers()
@@ -361,17 +403,17 @@ async def test_service_preserves_worker_profile_backward_compat():
 # Fixture helper
 # ---------------------------------------------------------------------------
 
+
 def _make_service(redis, cfg: ControlPlaneConfig) -> ControlPlaneService:
     """Build a ControlPlaneService with injected redis without starting background tasks."""
     svc = object.__new__(ControlPlaneService)
     svc._redis = redis
     svc._config = cfg
     from hfa_control.leader import LeaderElection
-    from hfa_control.registry import WorkerRegistry
     from hfa_control.shard import ShardOwnershipManager
     from hfa_control.admission import AdmissionController
     from hfa_control.scheduler import Scheduler
-    from hfa_control.recovery import RecoveryService
+
     svc._leader = LeaderElection(redis, cfg.instance_id, cfg)
     svc._registry = WorkerRegistry(redis, cfg)
     svc._shards = ShardOwnershipManager(redis, cfg)
