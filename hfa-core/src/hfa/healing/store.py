@@ -14,6 +14,7 @@ Design rules
 * close() is always safe to call (no-op on base class).
 * No print() anywhere — logging only.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 # Domain model
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class LoopState:
     """
@@ -47,13 +49,14 @@ class LoopState:
     total_cost_cents    Accumulated cost in INTEGER CENTS (no float).
     last_updated        Unix timestamp of last state write (set by store.set()).
     """
-    attempt:            int            = 0
-    fingerprint:        Optional[str]  = None
-    last_error:         Optional[str]  = None
-    circuit_open_until: Optional[float]= None
-    total_tokens_used:  int            = 0
-    total_cost_cents:   int            = 0       # ✅ integer cents, NOT float USD
-    last_updated:       float          = field(default_factory=time.time)
+
+    attempt: int = 0
+    fingerprint: Optional[str] = None
+    last_error: Optional[str] = None
+    circuit_open_until: Optional[float] = None
+    total_tokens_used: int = 0
+    total_cost_cents: int = 0  # ✅ integer cents, NOT float USD
+    last_updated: float = field(default_factory=time.time)
 
     def is_circuit_open(self) -> bool:
         """Return True if the circuit breaker is currently open."""
@@ -73,6 +76,7 @@ class LoopState:
 # ---------------------------------------------------------------------------
 # Abstract base
 # ---------------------------------------------------------------------------
+
 
 class StateStore(ABC):
     """
@@ -152,6 +156,7 @@ class StateStore(ABC):
 # InMemoryStateStore — for testing and single-node dev
 # ---------------------------------------------------------------------------
 
+
 class InMemoryStateStore(StateStore):
     """
     Thread-safe in-memory state store with TTL eviction.
@@ -170,10 +175,10 @@ class InMemoryStateStore(StateStore):
         cleanup_interval: int = 300,
     ) -> None:
         self._states: Dict[str, LoopState] = {}
-        self._lock            = asyncio.Lock()
-        self._default_ttl     = default_ttl
-        self._cleanup_interval= cleanup_interval
-        self._running         = True
+        self._lock = asyncio.Lock()
+        self._default_ttl = default_ttl
+        self._cleanup_interval = cleanup_interval
+        self._running = True
         # Defer task creation — must be called from a running event loop.
         # Use start() or lazy creation on first use.
         self._cleanup_task: Optional[asyncio.Task] = None
@@ -224,7 +229,7 @@ class InMemoryStateStore(StateStore):
             Number of entries actually deleted (InMemory contract).
         """
         self._ensure_task()
-        now     = time.time()
+        now = time.time()
         expired = []
         async with self._lock:
             for k, s in list(self._states.items()):
@@ -244,7 +249,9 @@ class InMemoryStateStore(StateStore):
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                logger.error("StateStore periodic cleanup error: %s", exc, exc_info=True)
+                logger.error(
+                    "StateStore periodic cleanup error: %s", exc, exc_info=True
+                )
 
     async def close(self) -> None:
         """Cancel background cleanup and clear all state."""
@@ -265,6 +272,7 @@ class InMemoryStateStore(StateStore):
 # RedisStateStore — production multi-node store
 # ---------------------------------------------------------------------------
 
+
 class RedisStateStore(StateStore):
     """
     Redis-backed state store using JSON serialisation.
@@ -281,9 +289,9 @@ class RedisStateStore(StateStore):
     """
 
     def __init__(self, redis_client, default_ttl: int = 3600) -> None:
-        self._redis   = redis_client
+        self._redis = redis_client
         self._default_ttl = default_ttl
-        self._prefix  = "healing:"
+        self._prefix = "healing:"
 
     def _full_key(self, key: str) -> str:
         return f"{self._prefix}{key}"
@@ -292,7 +300,9 @@ class RedisStateStore(StateStore):
         try:
             raw = await self._redis.get(self._full_key(key))
         except Exception as exc:
-            logger.error("RedisStateStore.get error key=%s: %s", key, exc, exc_info=True)
+            logger.error(
+                "RedisStateStore.get error key=%s: %s", key, exc, exc_info=True
+            )
             return None
         if raw is None:
             return None
@@ -320,7 +330,9 @@ class RedisStateStore(StateStore):
             )
             logger.debug("RedisStateStore.set: key=%s attempt=%d", key, state.attempt)
         except Exception as exc:
-            logger.error("RedisStateStore.set error key=%s: %s", key, exc, exc_info=True)
+            logger.error(
+                "RedisStateStore.set error key=%s: %s", key, exc, exc_info=True
+            )
             raise
 
     async def delete(self, key: str) -> None:

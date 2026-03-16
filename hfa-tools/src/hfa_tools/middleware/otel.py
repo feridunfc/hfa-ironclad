@@ -13,6 +13,7 @@ IRONCLAD rules
 * Middleware errors NEVER propagate to client — always degrade gracefully.
 * Span is created even if OTel not configured (no-op span from hfa.obs.otel).
 """
+
 from __future__ import annotations
 
 import logging
@@ -62,17 +63,15 @@ class OTelMiddleware(BaseHTTPMiddleware):
 
     def __init__(
         self,
-        app:        ASGIApp,
-        config:     Optional[OTelConfig] = None,
+        app: ASGIApp,
+        config: Optional[OTelConfig] = None,
         skip_paths: Optional[Set[str]] = None,
     ) -> None:
         super().__init__(app)
-        self._config     = config or _default_config
+        self._config = config or _default_config
         self._skip_paths = skip_paths or {"/health", "/metrics", "/docs", "/openapi.json"}
-        self._metrics    = HFAMetrics(config=self._config)
-        logger.info(
-            "OTelMiddleware initialised: skip_paths=%s", self._skip_paths
-        )
+        self._metrics = HFAMetrics(config=self._config)
+        logger.info("OTelMiddleware initialised: skip_paths=%s", self._skip_paths)
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         # Skip telemetry for health/metrics endpoints
@@ -81,16 +80,16 @@ class OTelMiddleware(BaseHTTPMiddleware):
                 return await call_next(request)
 
         span_name = f"hfa.http {request.method} {request.url.path}"
-        start_ts  = time.time()
+        start_ts = time.time()
 
         # Extract tenant/run_id from request state (set by TenantMiddleware)
         tenant_id = "unknown"
-        run_id    = None
+        run_id = None
         try:
             ctx = getattr(request.state, "tenant", None)
             if ctx:
                 tenant_id = ctx.tenant_id
-                run_id    = ctx.run_id
+                run_id = ctx.run_id
         except Exception:
             pass
 
@@ -104,9 +103,9 @@ class OTelMiddleware(BaseHTTPMiddleware):
         # Initial span attributes
         attrs = {
             SpanAttr.TENANT_ID: tenant_id,
-            "http.method":      request.method,
-            "http.url":         str(request.url),
-            "http.target":      request.url.path,
+            "http.method": request.method,
+            "http.url": str(request.url),
+            "http.target": request.url.path,
         }
         if run_id:
             attrs[SpanAttr.RUN_ID] = run_id
@@ -139,9 +138,7 @@ class OTelMiddleware(BaseHTTPMiddleware):
         except Exception:
             # Telemetry errors MUST NOT propagate — return 500 response
             if response is None:
-                response = Response(
-                    content="Internal server error", status_code=500
-                )
+                response = Response(content="Internal server error", status_code=500)
 
         finally:
             duration_ms = (time.time() - start_ts) * 1000
@@ -150,10 +147,10 @@ class OTelMiddleware(BaseHTTPMiddleware):
                 path_parts = request.url.path.strip("/").split("/")
                 agent_type = path_parts[-1] if path_parts else "unknown"
                 self._metrics.record_request(
-                    agent_type  = agent_type,
-                    tenant_id   = tenant_id,
-                    latency_ms  = duration_ms,
-                    success     = success,
+                    agent_type=agent_type,
+                    tenant_id=tenant_id,
+                    latency_ms=duration_ms,
+                    success=success,
                 )
             except Exception as exc:
                 logger.debug("OTelMiddleware metrics error (non-fatal): %s", exc)

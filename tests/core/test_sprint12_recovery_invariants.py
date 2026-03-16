@@ -9,6 +9,7 @@ Verifies:
   - Sprint 10 reschedule semantics unchanged (state → rescheduled, re-emits RunAdmittedEvent)
   - Sprint 10 DLQ semantics unchanged (state → dead_lettered, emits RunDeadLetteredEvent)
 """
+
 from __future__ import annotations
 
 import time
@@ -52,19 +53,23 @@ async def _seed_stale_run(
     stale_score = time.time() - age_seconds
     await redis.zadd("hfa:cp:running", {run_id: stale_score})
     await redis.set(f"hfa:run:state:{run_id}", state, ex=86400)
-    await redis.hset(f"hfa:run:meta:{run_id}", mapping={
-        "run_id":           run_id,
-        "tenant_id":        tenant_id,
-        "agent_type":       agent_type,
-        "worker_group":     "grp-a",
-        "reschedule_count": str(reschedule_count),
-        "admitted_at":      str(stale_score),
-    })
+    await redis.hset(
+        f"hfa:run:meta:{run_id}",
+        mapping={
+            "run_id": run_id,
+            "tenant_id": tenant_id,
+            "agent_type": agent_type,
+            "worker_group": "grp-a",
+            "reschedule_count": str(reschedule_count),
+            "admitted_at": str(stale_score),
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
 # _find_stale_runs — detection
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_find_stale_runs_detects_old_running_run(config):
@@ -104,6 +109,7 @@ async def test_find_stale_runs_ignores_terminal_run(config):
 # ---------------------------------------------------------------------------
 # _sweep — metrics instrumentation
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_sweep_emits_stale_detected_metric(config):
@@ -160,6 +166,7 @@ async def test_sweep_no_stale_no_metrics(config):
 # ---------------------------------------------------------------------------
 # Sprint 10 semantics preserved — reschedule writes correct state + event
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_reschedule_sets_state_and_emits_run_admitted(config):

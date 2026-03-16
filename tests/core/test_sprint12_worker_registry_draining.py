@@ -10,6 +10,7 @@ Verifies:
   - workers_excluded_draining_total metric increments
   - _on_heartbeat preserves DRAINING status across heartbeat cycles
 """
+
 from __future__ import annotations
 
 import json
@@ -43,24 +44,28 @@ def config():
 async def _register_worker(redis, worker_id: str, status: str, region: str = "us-east-1"):
     """Helper: write a worker hash directly into Redis."""
     key = f"hfa:cp:worker:{worker_id}"
-    await redis.hset(key, mapping={
-        "worker_id":    worker_id,
-        "worker_group": f"group-{worker_id}",
-        "region":       region,
-        "shards":       json.dumps([0]),
-        "capacity":     "10",
-        "inflight":     "2",
-        "status":       status,
-        "last_seen":    str(time.time()),
-        "version":      "1.0.0",
-        "capabilities": json.dumps(["base"]),
-    })
+    await redis.hset(
+        key,
+        mapping={
+            "worker_id": worker_id,
+            "worker_group": f"group-{worker_id}",
+            "region": region,
+            "shards": json.dumps([0]),
+            "capacity": "10",
+            "inflight": "2",
+            "status": status,
+            "last_seen": str(time.time()),
+            "version": "1.0.0",
+            "capabilities": json.dumps(["base"]),
+        },
+    )
     await redis.sadd(f"hfa:cp:workers:by_region:{region}", worker_id)
 
 
 # ---------------------------------------------------------------------------
 # WorkerProfile.is_draining property
 # ---------------------------------------------------------------------------
+
 
 def test_worker_profile_is_draining_true():
     profile = WorkerProfile(
@@ -89,6 +94,7 @@ def test_worker_profile_is_draining_false_when_healthy():
 # ---------------------------------------------------------------------------
 # Registry queries
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_list_healthy_workers_includes_draining(config):
@@ -142,18 +148,21 @@ async def test_list_healthy_excludes_dead_workers(config):
     registry = WorkerRegistry(redis, config_short_ttl)
 
     key = "hfa:cp:worker:w-stale"
-    await redis.hset(key, mapping={
-        "worker_id":    "w-stale",
-        "worker_group": "grp",
-        "region":       "us-east-1",
-        "shards":       "[]",
-        "capacity":     "10",
-        "inflight":     "0",
-        "status":       WorkerStatus.HEALTHY.value,
-        "last_seen":    str(time.time() - 120),  # 2 minutes ago
-        "version":      "",
-        "capabilities": "[]",
-    })
+    await redis.hset(
+        key,
+        mapping={
+            "worker_id": "w-stale",
+            "worker_group": "grp",
+            "region": "us-east-1",
+            "shards": "[]",
+            "capacity": "10",
+            "inflight": "0",
+            "status": WorkerStatus.HEALTHY.value,
+            "last_seen": str(time.time() - 120),  # 2 minutes ago
+            "version": "",
+            "capabilities": "[]",
+        },
+    )
     await redis.sadd("hfa:cp:workers:by_region:us-east-1", "w-stale")
 
     workers = await registry.list_healthy_workers()
@@ -164,6 +173,7 @@ async def test_list_healthy_excludes_dead_workers(config):
 # ---------------------------------------------------------------------------
 # Heartbeat preserves DRAINING status
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_heartbeat_preserves_draining_status(config):
@@ -179,6 +189,7 @@ async def test_heartbeat_preserves_draining_status(config):
 
     # Simulate a heartbeat arriving (WorkerHeartbeatEvent)
     from hfa.events.schema import WorkerHeartbeatEvent
+
     heartbeat = WorkerHeartbeatEvent(
         worker_id="w-drain",
         worker_group="group-w-drain",
@@ -204,6 +215,7 @@ async def test_heartbeat_sets_healthy_for_new_worker(config):
     registry = WorkerRegistry(redis, config)
 
     from hfa.events.schema import WorkerHeartbeatEvent
+
     heartbeat = WorkerHeartbeatEvent(
         worker_id="w-new",
         worker_group="grp",

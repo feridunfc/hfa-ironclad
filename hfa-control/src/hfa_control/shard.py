@@ -17,6 +17,7 @@ IRONCLAD rules
 * No asyncio.get_event_loop() — get_running_loop().
 * close() always safe.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -28,16 +29,15 @@ from hfa_control.exceptions import ShardOwnershipError
 
 logger = logging.getLogger(__name__)
 
-OWNER_TTL       = 60   # seconds; worker must publish heartbeat to renew
+OWNER_TTL = 60  # seconds; worker must publish heartbeat to renew
 MONITOR_INTERVAL = 15  # seconds
 
 
 class ShardOwnershipManager:
-
     def __init__(self, redis, config) -> None:
-        self._redis  = redis
+        self._redis = redis
         self._config = config
-        self._task:  Optional[asyncio.Task] = None
+        self._task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -45,9 +45,7 @@ class ShardOwnershipManager:
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
-        self._task = loop.create_task(
-            self._ownership_monitor(), name="shard.monitor"
-        )
+        self._task = loop.create_task(self._ownership_monitor(), name="shard.monitor")
         logger.info("ShardOwnershipManager started")
 
     async def close(self) -> None:
@@ -85,7 +83,7 @@ class ShardOwnershipManager:
                 int(shard.decode() if isinstance(shard, bytes) else shard)
                 for shard, group in owners.items()
                 if (group.decode() if isinstance(group, bytes) else group)
-                   == worker_group
+                == worker_group
             )
         except Exception as exc:
             logger.error("ShardOwnershipManager.shards_for_group error: %s", exc)
@@ -96,8 +94,9 @@ class ShardOwnershipManager:
         try:
             raw = await self._redis.hgetall("hfa:cp:shard:owners")
             return {
-                int(k.decode() if isinstance(k, bytes) else k):
-                (v.decode() if isinstance(v, bytes) else v)
+                int(k.decode() if isinstance(k, bytes) else k): (
+                    v.decode() if isinstance(v, bytes) else v
+                )
                 for k, v in raw.items()
             }
         except Exception as exc:
@@ -114,7 +113,7 @@ class ShardOwnershipManager:
         Returns True if claim succeeded, False if already owned by another group.
         """
         key = f"hfa:cp:shard:owner:{shard}"
-        ok  = await self._redis.set(key, worker_group, nx=True, ex=OWNER_TTL)
+        ok = await self._redis.set(key, worker_group, nx=True, ex=OWNER_TTL)
         if ok:
             await self._redis.hset("hfa:cp:shard:owners", shard, worker_group)
             logger.info("Shard claimed: shard=%d group=%s", shard, worker_group)
@@ -126,15 +125,19 @@ class ShardOwnershipManager:
         Returns False if the shard is no longer owned by this group
         (e.g., was reclaimed by another worker during outage).
         """
-        key     = f"hfa:cp:shard:owner:{shard}"
+        key = f"hfa:cp:shard:owner:{shard}"
         current = await self._redis.get(key)
-        if current and (current.decode() if isinstance(current, bytes) else current) \
-                == worker_group:
+        if (
+            current
+            and (current.decode() if isinstance(current, bytes) else current)
+            == worker_group
+        ):
             await self._redis.expire(key, OWNER_TTL)
             return True
         logger.warning(
             "Shard renew failed: shard=%d requested_group=%s current_owner=%s",
-            shard, worker_group,
+            shard,
+            worker_group,
             current.decode() if current else "none",
         )
         return False
@@ -169,7 +172,8 @@ class ShardOwnershipManager:
                     await self._redis.hdel("hfa:cp:shard:owners", shard)
                     logger.warning(
                         "Shard orphaned: shard=%d (was %s) — removed from map",
-                        shard, group,
+                        shard,
+                        group,
                     )
         except Exception as exc:
             logger.error("ShardOwnershipManager._check_orphans error: %s", exc)

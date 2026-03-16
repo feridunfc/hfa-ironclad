@@ -30,6 +30,7 @@ IRONCLAD rules
 * close() always safe.
 * cost_cents: int — no float USD.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -39,10 +40,12 @@ import time
 from typing import Optional
 
 from hfa.events.schema import (
-    RunAdmittedEvent, RunRescheduledEvent, RunDeadLetteredEvent,
+    RunAdmittedEvent,
+    RunRescheduledEvent,
+    RunDeadLetteredEvent,
 )
 from hfa.events.codec import serialize_event
-from hfa_control.models     import ControlPlaneConfig
+from hfa_control.models import ControlPlaneConfig
 from hfa_control.exceptions import DLQEntryNotFoundError, TenantMismatchError
 
 try:
@@ -52,6 +55,7 @@ except Exception:
 
 try:
     from hfa.obs.tracing import get_tracer  # type: ignore
+
     _tracer = get_tracer("hfa.recovery")
 except Exception:
     _tracer = None
@@ -60,11 +64,10 @@ logger = logging.getLogger(__name__)
 
 
 class RecoveryService:
-
     def __init__(self, redis, config: ControlPlaneConfig) -> None:
-        self._redis  = redis
+        self._redis = redis
         self._config = config
-        self._task:  Optional[asyncio.Task] = None
+        self._task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -72,11 +75,11 @@ class RecoveryService:
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
-        self._task = loop.create_task(
-            self._loop(), name="recovery.sweep"
+        self._task = loop.create_task(self._loop(), name="recovery.sweep")
+        logger.info(
+            "RecoveryService started: sweep_interval=%gs",
+            self._config.recovery_sweep_interval,
         )
-        logger.info("RecoveryService started: sweep_interval=%gs",
-                    self._config.recovery_sweep_interval)
 
     async def close(self) -> None:
         if self._task:
@@ -104,7 +107,7 @@ class RecoveryService:
     async def _sweep(self) -> None:
         stale_runs = await self._find_stale_runs()
         rescheduled = 0
-        dlq_count   = 0
+        dlq_count = 0
 
         if stale_runs and _M:
             _M.recovery_stale_detected_total.inc(len(stale_runs))
@@ -123,7 +126,9 @@ class RecoveryService:
         if stale_runs:
             logger.info(
                 "Recovery sweep: stale=%d rescheduled=%d dlq=%d",
-                len(stale_runs), rescheduled, dlq_count,
+                len(stale_runs),
+                rescheduled,
+                dlq_count,
             )
 
     # ------------------------------------------------------------------
@@ -142,13 +147,15 @@ class RecoveryService:
                 self._config.running_zset, 0, cutoff
             )
         except Exception as exc:
-            logger.error("RecoveryService._find_stale_runs zrangebyscore error: %s", exc)
+            logger.error(
+                "RecoveryService._find_stale_runs zrangebyscore error: %s", exc
+            )
             return []
 
         result: list[str] = []
         for run_id_b in stale_raw:
             run_id = run_id_b.decode() if isinstance(run_id_b, bytes) else run_id_b
-            state  = await self._redis.get(f"hfa:run:state:{run_id}")
+            state = await self._redis.get(f"hfa:run:state:{run_id}")
             if state:
                 s = state.decode() if isinstance(state, bytes) else state
                 if s in ("running", "scheduled"):
@@ -172,28 +179,33 @@ class RecoveryService:
             v = meta.get(k.encode()) or meta.get(k)
             return (v.decode() if isinstance(v, bytes) else v) or ""
 
-        tenant_id        = _s("tenant_id")
-        agent_type       = _s("agent_type")
-        prev_worker      = _s("worker_group")
+        tenant_id = _s("tenant_id")
+        agent_type = _s("agent_type")
+        prev_worker = _s("worker_group")
         reschedule_count = int(_s("reschedule_count") or "0")
 
         if reschedule_count >= self._config.max_reschedule_attempts:
             return await self._dead_letter(
-                run_id, tenant_id, reschedule_count,
+                run_id,
+                tenant_id,
+                reschedule_count,
                 "max_reschedule_exceeded",
             )
 
         return await self._reschedule(
-            run_id, tenant_id, agent_type,
-            prev_worker, reschedule_count,
+            run_id,
+            tenant_id,
+            agent_type,
+            prev_worker,
+            reschedule_count,
         )
 
     async def _reschedule(
         self,
-        run_id:           str,
-        tenant_id:        str,
-        agent_type:       str,
-        prev_worker:      str,
+        run_id: str,
+        tenant_id: str,
+        agent_type: str,
+        prev_worker: str,
         reschedule_count: int,
     ) -> str:
         new_count = reschedule_count + 1
@@ -233,33 +245,36 @@ class RecoveryService:
         )
 
         # Reset ZSET score to now so we don't immediately re-detect as stale
-        await self._redis.zadd(
-            self._config.running_zset, {run_id: time.time()}
-        )
+        await self._redis.zadd(self._config.running_zset, {run_id: time.time()})
 
         logger.warning(
             "Rescheduled: run=%s tenant=%s attempt=%d/%d prev_worker=%s",
-            run_id, tenant_id, new_count,
-            self._config.max_reschedule_attempts, prev_worker,
+            run_id,
+            tenant_id,
+            new_count,
+            self._config.max_reschedule_attempts,
+            prev_worker,
         )
         return "rescheduled"
 
     async def _dead_letter(
         self,
-        run_id:           str,
-        tenant_id:        str,
+        run_id: str,
+        tenant_id: str,
         reschedule_count: int,
-        reason:           str,
+        reason: str,
     ) -> str:
         await self._redis.set(
-            f"hfa:run:state:{run_id}", "dead_lettered", ex=604_800  # 7 days
+            f"hfa:run:state:{run_id}",
+            "dead_lettered",
+            ex=604_800,  # 7 days
         )
         await self._redis.hset(
             f"hfa:cp:dlq:meta:{run_id}",
             mapping={
-                "run_id":           run_id,
-                "tenant_id":        tenant_id,
-                "reason":           reason,
+                "run_id": run_id,
+                "tenant_id": tenant_id,
+                "reason": reason,
                 "reschedule_count": str(reschedule_count),
                 "dead_lettered_at": str(time.time()),
             },
@@ -282,7 +297,10 @@ class RecoveryService:
 
         logger.error(
             "DLQ: run=%s tenant=%s reason=%s attempts=%d",
-            run_id, tenant_id, reason, reschedule_count,
+            run_id,
+            tenant_id,
+            reason,
+            reschedule_count,
         )
         return "dlq"
 
@@ -317,19 +335,17 @@ class RecoveryService:
         if raw_payload:
             try:
                 payload = json.loads(
-                    raw_payload.decode() if isinstance(raw_payload, bytes) else raw_payload
+                    raw_payload.decode()
+                    if isinstance(raw_payload, bytes)
+                    else raw_payload
                 )
             except json.JSONDecodeError:
                 pass
 
         # Reset state
-        await self._redis.hset(
-            f"hfa:run:meta:{run_id}", "reschedule_count", "0"
-        )
+        await self._redis.hset(f"hfa:run:meta:{run_id}", "reschedule_count", "0")
         await self._redis.set(f"hfa:run:state:{run_id}", "admitted", ex=86400)
-        await self._redis.zadd(
-            self._config.running_zset, {run_id: time.time()}
-        )
+        await self._redis.zadd(self._config.running_zset, {run_id: time.time()})
 
         # Re-emit to Scheduler
         evt = RunAdmittedEvent(
@@ -356,15 +372,16 @@ class RecoveryService:
         except Exception:
             return 0
 
-    async def list_dlq(
-        self, tenant_id: str, limit: int = 50
-    ) -> list[dict]:
+    async def list_dlq(self, tenant_id: str, limit: int = 50) -> list[dict]:
         """
-        Return DLQ entries for a specific tenant.
+        Return DLQ entries.
+        If tenant_id == "__all__", returns entries for all tenants.
+        Otherwise filters to the specified tenant.
         Scans hfa:cp:dlq:meta:* keys (bounded by 7-day TTL).
         """
+        _all = tenant_id == "__all__"
         try:
-            cursor  = 0
+            cursor = 0
             entries = []
             while True:
                 cursor, keys = await self._redis.scan(
@@ -374,17 +391,25 @@ class RecoveryService:
                     meta = await self._redis.hgetall(key)
                     if not meta:
                         continue
+
                     def _s(k: str) -> str:
                         v = meta.get(k.encode()) or meta.get(k)
                         return (v.decode() if isinstance(v, bytes) else v) or ""
-                    if _s("tenant_id") == tenant_id:
-                        entries.append({
-                            "run_id":           _s("run_id"),
-                            "tenant_id":        _s("tenant_id"),
-                            "reason":           _s("reason"),
-                            "reschedule_count": int(_s("reschedule_count") or "0"),
-                            "dead_lettered_at": float(_s("dead_lettered_at") or "0"),
-                        })
+
+                    if _all or _s("tenant_id") == tenant_id:
+                        entries.append(
+                            {
+                                "run_id": _s("run_id"),
+                                "tenant_id": _s("tenant_id"),
+                                "reason": _s("reason"),
+                                "reschedule_count": int(_s("reschedule_count") or "0"),
+                                "dead_lettered_at": float(
+                                    _s("dead_lettered_at") or "0"
+                                ),
+                                "original_error": _s("original_error"),
+                                "cost_cents": int(_s("cost_cents") or "0"),
+                            }
+                        )
                     if len(entries) >= limit:
                         break
                 if cursor == 0 or len(entries) >= limit:

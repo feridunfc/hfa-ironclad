@@ -11,6 +11,7 @@ IRONCLAD rules
 * trace_parent / trace_state: W3C TraceContext across process boundaries.
 * from_redis() never raises — safe defaults on missing keys.
 """
+
 from __future__ import annotations
 
 import time
@@ -41,6 +42,7 @@ class HFAEvent:
 # ---------------------------------------------------------------------------
 # Sprint 9 — unchanged
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class RunRequestedEvent(HFAEvent):
@@ -81,6 +83,7 @@ class RunFailedEvent(HFAEvent):
 # ---------------------------------------------------------------------------
 # Sprint 10 — additive
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class RunAdmittedEvent(HFAEvent):
@@ -170,12 +173,14 @@ class GraphPatchedEvent(HFAEvent):
 # Sprint 12 — additive only (no existing fields changed)
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class RunStartedEvent(HFAEvent):
     """
     Emitted when a worker successfully claims a run and begins execution.
     Additive — optional for consumers that do not need it.
     """
+
     event_type: str = "RunStarted"
     run_id: str = ""
     tenant_id: str = ""

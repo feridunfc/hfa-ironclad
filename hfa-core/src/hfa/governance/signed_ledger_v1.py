@@ -13,6 +13,7 @@ Design
 * Storage backend is injectable (InMemoryLedgerStore in tests;
   Redis/Postgres in production — Sprint 4 adds RedisLedgerStore).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # KeyProvider ABC
 # ---------------------------------------------------------------------------
+
 
 class KeyProvider(ABC):
     """
@@ -82,6 +84,7 @@ class KeyProviderError(Exception):
 # ---------------------------------------------------------------------------
 # Ed25519EnvKeyProvider  — loads key from env-var or PEM bytes
 # ---------------------------------------------------------------------------
+
 
 class Ed25519EnvKeyProvider(KeyProvider):
     """
@@ -153,7 +156,9 @@ class Ed25519EnvKeyProvider(KeyProvider):
             return self._private_key
 
         try:
-            from cryptography.hazmat.primitives.serialization import load_pem_private_key
+            from cryptography.hazmat.primitives.serialization import (
+                load_pem_private_key,
+            )
         except ImportError as exc:
             raise KeyProviderError(
                 "cryptography package required: pip install cryptography>=42.0"
@@ -167,6 +172,7 @@ class Ed25519EnvKeyProvider(KeyProvider):
             # Infer key_id from settings if not explicitly set
             if self._key_id == "default":
                 from hfa.core.config import settings
+
                 env_id = getattr(settings, "HFA_LEDGER_KEY_ID", None)
                 if env_id:
                     self._key_id = env_id
@@ -223,12 +229,15 @@ class Ed25519EnvKeyProvider(KeyProvider):
         try:
             return base64.b64decode(val)
         except Exception as exc:
-            raise KeyProviderError(f"Failed to base64-decode config setting {attr!r}") from exc
+            raise KeyProviderError(
+                f"Failed to base64-decode config setting {attr!r}"
+            ) from exc
 
 
 # ---------------------------------------------------------------------------
 # LedgerEntry — immutable signed record
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class LedgerEntry:
@@ -249,6 +258,7 @@ class LedgerEntry:
     signature:   Hex-encoded Ed25519 signature over canonical bytes.
     key_id:      Logical key identifier (for key rotation audit).
     """
+
     entry_id: str
     sequence: int
     tenant_id: str
@@ -305,6 +315,7 @@ class LedgerEntry:
 # LedgerStore ABC + InMemory implementation
 # ---------------------------------------------------------------------------
 
+
 class LedgerStore(ABC):
     """Pluggable storage backend for LedgerEntry objects."""
 
@@ -334,7 +345,9 @@ class InMemoryLedgerStore(LedgerStore):
             entries = self._store.setdefault(key, [])
             # Idempotency: skip duplicates by entry_id
             if any(e.entry_id == entry.entry_id for e in entries):
-                logger.debug("LedgerStore: duplicate entry_id=%s ignored", entry.entry_id)
+                logger.debug(
+                    "LedgerStore: duplicate entry_id=%s ignored", entry.entry_id
+                )
                 return
             entries.append(entry)
 
@@ -351,6 +364,7 @@ class InMemoryLedgerStore(LedgerStore):
 # ---------------------------------------------------------------------------
 # SignedLedger — the main API
 # ---------------------------------------------------------------------------
+
 
 class LedgerIntegrityError(Exception):
     """Raised when chain verification fails (tamper detected)."""
@@ -389,9 +403,9 @@ class SignedLedger:
         key_provider: KeyProvider,
         store: Optional[LedgerStore] = None,
     ) -> None:
-        self._key   = key_provider
+        self._key = key_provider
         self._store = store or InMemoryLedgerStore()
-        self._in_flight: set[asyncio.Task] = set()   # track pending writes
+        self._in_flight: set[asyncio.Task] = set()  # track pending writes
         logger.info(
             "SignedLedger initialised: key_id=%s store=%s",
             key_provider.key_id,
@@ -462,7 +476,10 @@ class SignedLedger:
         await self._store.append(signed)
         logger.info(
             "Ledger append: tenant=%s run=%s seq=%d event=%s",
-            tenant_id, run_id, sequence, event_type,
+            tenant_id,
+            run_id,
+            sequence,
+            event_type,
         )
         return signed
 
@@ -503,13 +520,14 @@ class SignedLedger:
             # 2. Chain hash check
             if i == 0:
                 if entry.prev_hash != "":
-                    raise LedgerIntegrityError("Genesis entry must have empty prev_hash")
+                    raise LedgerIntegrityError(
+                        "Genesis entry must have empty prev_hash"
+                    )
             else:
                 expected_prev = entries[i - 1].content_hash()
                 if entry.prev_hash != expected_prev:
                     raise LedgerIntegrityError(
-                        f"Chain broken at sequence {entry.sequence}: "
-                        f"prev_hash mismatch"
+                        f"Chain broken at sequence {entry.sequence}: prev_hash mismatch"
                     )
 
             # 3. Signature check — verify against unsigned canonical bytes
@@ -535,7 +553,9 @@ class SignedLedger:
 
         logger.info(
             "verify_chain OK: tenant=%s run=%s entries=%d",
-            tenant_id, run_id, len(entries),
+            tenant_id,
+            run_id,
+            len(entries),
         )
         return True
 
@@ -575,7 +595,8 @@ class SignedLedger:
         if errors:
             logger.error(
                 "SignedLedger.close(): %d write(s) failed during drain: %s",
-                len(errors), errors,
+                len(errors),
+                errors,
             )
         else:
             logger.info("SignedLedger.close(): all %d write(s) drained OK", count)

@@ -10,8 +10,8 @@ Verifies:
   - deserialize_run_completed and deserialize_run_failed handle missing fields
   - RunStartedEvent is additive (new in Sprint 12) and doesn't affect existing events
 """
-from __future__ import annotations
 
+from __future__ import annotations
 
 
 from hfa.events.codec import (
@@ -38,6 +38,7 @@ from hfa.events.schema import (
 # ---------------------------------------------------------------------------
 # Existing event names must not change
 # ---------------------------------------------------------------------------
+
 
 def test_existing_event_class_names_unchanged():
     """All Sprint 9/10/11 event class names must be stable."""
@@ -70,6 +71,7 @@ def test_run_completed_required_fields_unchanged():
 # ---------------------------------------------------------------------------
 # deserialize_run_requested: missing optional fields → safe defaults
 # ---------------------------------------------------------------------------
+
 
 def test_deserialize_run_requested_minimal_payload():
     """Old payload missing idempotency_key, payload, trace fields."""
@@ -109,6 +111,7 @@ def test_deserialize_run_requested_priority_defaults_to_5():
 # deserialize_run_completed: Sprint 12 addition — tolerates missing fields
 # ---------------------------------------------------------------------------
 
+
 def test_deserialize_run_completed_full_payload():
     data: dict = {
         b"run_id": b"r1",
@@ -147,6 +150,7 @@ def test_deserialize_run_completed_unknown_fields_tolerated():
 # deserialize_run_failed: Sprint 12 addition — tolerates missing fields
 # ---------------------------------------------------------------------------
 
+
 def test_deserialize_run_failed_full_payload():
     data: dict = {
         b"run_id": b"r1",
@@ -171,6 +175,7 @@ def test_deserialize_run_failed_minimal():
 # ---------------------------------------------------------------------------
 # RunStartedEvent — Sprint 12 additive event
 # ---------------------------------------------------------------------------
+
 
 def test_run_started_event_is_additive():
     e = RunStartedEvent(
@@ -202,6 +207,7 @@ def test_run_started_event_default_fields():
 # ---------------------------------------------------------------------------
 # Round-trip: serialize then deserialize
 # ---------------------------------------------------------------------------
+
 
 def test_serialize_deserialize_run_requested_roundtrip():
     original = RunRequestedEvent(

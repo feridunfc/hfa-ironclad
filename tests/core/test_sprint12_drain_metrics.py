@@ -9,6 +9,7 @@ Verifies:
   - is_draining property reflects drain state
   - second call to start_drain is idempotent (no double-count)
 """
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock

@@ -3,6 +3,7 @@ hfa-tools/src/hfa_tools/middleware/tenant.py
 
 IRONCLAD — Tenant extraction, validation, and request-scoped injection.
 """
+
 from __future__ import annotations
 
 import logging
@@ -126,24 +127,18 @@ def validate_run_id_format(run_id: str) -> tuple[str, str]:
     uuid_tail = parts[2]
 
     if not is_valid_tenant_id(tenant_id):
-        raise TenantFormatError(
-            f"Invalid tenant segment inside run_id: {run_id!r}"
-        )
+        raise TenantFormatError(f"Invalid tenant segment inside run_id: {run_id!r}")
 
     try:
         parsed = uuid.UUID(uuid_tail)
     except (ValueError, AttributeError) as exc:
-        raise TenantFormatError(
-            f"run_id must contain a valid UUID tail: {run_id!r}"
-        ) from exc
+        raise TenantFormatError(f"run_id must contain a valid UUID tail: {run_id!r}") from exc
 
     if parsed.int == 0:
         raise TenantFormatError("run_id UUID must not be nil UUID")
 
     if parsed.version != 4:
-        raise TenantFormatError(
-            f"run_id UUID must be UUIDv4, got version {parsed.version}"
-        )
+        raise TenantFormatError(f"run_id UUID must be UUIDv4, got version {parsed.version}")
 
     return tenant_id, str(parsed)
 
@@ -164,9 +159,7 @@ def extract_tenant_from_resource_id(resource_id: str) -> Optional[str]:
 def assert_tenant_owns_resource(tenant_id: str, resource_id: str) -> None:
     extracted = extract_tenant_from_resource_id(resource_id)
     if extracted is None:
-        raise TenantFormatError(
-            f"Cannot extract tenant from resource_id={resource_id!r}"
-        )
+        raise TenantFormatError(f"Cannot extract tenant from resource_id={resource_id!r}")
     if extracted != tenant_id:
         raise TenantMismatchError(
             f"Tenant mismatch: authenticated={tenant_id!r} "

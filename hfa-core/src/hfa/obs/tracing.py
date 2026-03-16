@@ -45,6 +45,7 @@ IRONCLAD rules
 * OTel SDK absent → no crash, no log spam, silent no-op.
 * Never raise from any HFATracing method.
 """
+
 from __future__ import annotations
 
 import logging
@@ -58,6 +59,7 @@ logger = logging.getLogger(__name__)
 # Tracer factory
 # ---------------------------------------------------------------------------
 
+
 def get_tracer(name: str = "hfa.core") -> Any:
     """
     Return an OTel Tracer for the given instrumentation scope.
@@ -68,6 +70,7 @@ def get_tracer(name: str = "hfa.core") -> Any:
     """
     try:
         from opentelemetry import trace
+
         return trace.get_tracer(name)
     except ImportError:
         return _NoOpTracer()
@@ -79,6 +82,7 @@ def get_tracer(name: str = "hfa.core") -> Any:
 # ---------------------------------------------------------------------------
 # HFATracing static helper
 # ---------------------------------------------------------------------------
+
 
 class HFATracing:
     """
@@ -101,7 +105,9 @@ class HFATracing:
         try:
             for k, v in attrs.items():
                 if v is not None:
-                    span.set_attribute(k, str(v) if not isinstance(v, (bool, int, float)) else v)
+                    span.set_attribute(
+                        k, str(v) if not isinstance(v, (bool, int, float)) else v
+                    )
         except Exception as exc:
             logger.debug("HFATracing.set_attrs error: %s", exc)
 
@@ -117,6 +123,7 @@ class HFATracing:
             return
         try:
             from opentelemetry.trace import Status, StatusCode
+
             span.record_exception(exc)
             span.set_status(Status(StatusCode.ERROR, str(exc)))
         except ImportError:
@@ -134,6 +141,7 @@ class HFATracing:
             return
         try:
             from opentelemetry.trace import Status, StatusCode
+
             span.set_status(Status(StatusCode.OK))
         except ImportError:
             pass
@@ -145,11 +153,12 @@ class HFATracing:
 # Convenience: safe span context manager
 # ---------------------------------------------------------------------------
 
+
 @contextmanager
 def hfa_span(
     tracer: Any,
-    name:   str,
-    attrs:  Optional[Dict[str, Any]] = None,
+    name: str,
+    attrs: Optional[Dict[str, Any]] = None,
 ) -> Generator[Any, None, None]:
     """
     Context manager that opens a span, sets attributes, and records any
@@ -189,6 +198,7 @@ def hfa_span(
 # No-op implementations (used when OTel SDK is absent)
 # ---------------------------------------------------------------------------
 
+
 class _NoOpSpan:
     """Minimal no-op span — absorbs all calls silently."""
 
@@ -205,7 +215,7 @@ class _NoOpSpan:
         return self
 
     def __exit__(self, *_: Any) -> bool:
-        return False   # do not suppress exceptions
+        return False  # do not suppress exceptions
 
 
 class _NoOpTracer:
