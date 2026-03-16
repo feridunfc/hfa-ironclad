@@ -360,9 +360,12 @@ class RecoveryService:
         self, tenant_id: str, limit: int = 50
     ) -> list[dict]:
         """
-        Return DLQ entries for a specific tenant.
+        Return DLQ entries.
+        If tenant_id == "__all__", returns entries for all tenants.
+        Otherwise filters to the specified tenant.
         Scans hfa:cp:dlq:meta:* keys (bounded by 7-day TTL).
         """
+        _all = tenant_id == "__all__"
         try:
             cursor  = 0
             entries = []
@@ -377,13 +380,15 @@ class RecoveryService:
                     def _s(k: str) -> str:
                         v = meta.get(k.encode()) or meta.get(k)
                         return (v.decode() if isinstance(v, bytes) else v) or ""
-                    if _s("tenant_id") == tenant_id:
+                    if _all or _s("tenant_id") == tenant_id:
                         entries.append({
                             "run_id":           _s("run_id"),
                             "tenant_id":        _s("tenant_id"),
                             "reason":           _s("reason"),
                             "reschedule_count": int(_s("reschedule_count") or "0"),
                             "dead_lettered_at": float(_s("dead_lettered_at") or "0"),
+                            "original_error":   _s("original_error"),
+                            "cost_cents":       int(_s("cost_cents") or "0"),
                         })
                     if len(entries) >= limit:
                         break

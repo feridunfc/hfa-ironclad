@@ -1,6 +1,26 @@
 """
-tests/core/test_sprint10_scheduler.py
+hfa-control/tests/test_sprint10_scheduler.py
 IRONCLAD Sprint 10 — Scheduler tests
+
+All tests are fully offline:
+  * fakeredis.aioredis for Redis
+  * unittest.mock.AsyncMock for WorkerRegistry
+  * No real network, no real OTel endpoint
+
+Coverage
+--------
+  ✔ LEAST_LOADED selects lowest-load worker
+  ✔ LEAST_LOADED rejects when all workers at capacity
+  ✔ REGION_AFFINITY prefers matching region
+  ✔ REGION_AFFINITY falls back to global when no regional workers
+  ✔ ROUND_ROBIN rotates across groups
+  ✔ CAPABILITY_MATCH prefers workers with matching capability
+  ✔ PlacementError when no healthy workers
+  ✔ run state = 'scheduled' after placement
+  ✔ run metadata written to hfa:run:meta:{run_id}
+  ✔ RunScheduledEvent emitted to control stream
+  ✔ RunRequestedEvent forwarded to correct shard stream
+  ✔ XAUTOCLAIM recovery re-processes admitted events
 """
 from __future__ import annotations
 
@@ -9,7 +29,6 @@ import fakeredis.aioredis as faredis
 from unittest.mock import AsyncMock
 
 from hfa.events.schema       import RunAdmittedEvent
-# from hfa.events.codec        import serialize_event
 from hfa_control.scheduler   import Scheduler
 from hfa_control.models      import (
     WorkerProfile, WorkerStatus, ControlPlaneConfig,
@@ -24,7 +43,6 @@ def _cfg(**kw) -> ControlPlaneConfig:
         "stale_run_timeout": 0.1,
         "recovery_sweep_interval": 999,
         "max_reschedule_attempts": 3,
-        "region": "us-east-1",
     }
     data.update(kw)
     return ControlPlaneConfig(**data)
@@ -53,20 +71,12 @@ def _event(
 
 
 async def _make_sched(redis, workers, shard=4) -> Scheduler:
-    # BUG FIX: AsyncMock(return_value=...) bazen liste yerine mock döndürüyor.
-    # Garantili yöntem olarak async fonksiyon atıyoruz.
     registry = AsyncMock()
-    async def mock_list_workers(*args, **kwargs):
-        return workers
-    registry.list_healthy_workers.side_effect = mock_list_workers
-
-    shards = AsyncMock()
-    async def mock_shard_for_group(*args, **kwargs):
-        return shard
-    shards.shard_for_group.side_effect = mock_shard_for_group
-
-    cfg = _cfg()
-    sched = Scheduler(redis, registry, shards, cfg)
+    registry.list_healthy_workers = AsyncMock(return_value=workers)
+    shards   = AsyncMock()
+    shards.shard_for_group = AsyncMock(return_value=shard)
+    cfg      = _cfg()
+    sched    = Scheduler(redis, registry, shards, cfg)
     return sched
 
 
@@ -86,6 +96,7 @@ class TestSchedulerPlacement:
         evt   = _event(policy="LEAST_LOADED")
         await sched._schedule(evt)
 
+        # grp-b owns shard=3 in our mock; verify shard_for_group was called with grp-b
         sched._shards.shard_for_group.assert_called_once_with("grp-b", evt.run_id)
 
     @pytest.mark.asyncio
@@ -106,17 +117,18 @@ class TestSchedulerPlacement:
     async def test_region_affinity_prefers_matching_region(self):
         redis = faredis.FakeRedis()
         registry = AsyncMock()
+        # first call: eu workers
         eu_worker = _worker("eu0", "eu-grp", region="eu-west-1", inflight=1)
         us_worker = _worker("us0", "us-grp", region="us-east-1", inflight=0)
-
-        async def mock_list_regional_workers(*args, **kwargs):
-            return [eu_worker, us_worker]
-        registry.list_healthy_workers.side_effect = mock_list_regional_workers
-
+        registry.list_healthy_workers = AsyncMock(
+            side_effect=[
+                [eu_worker, us_worker],  # regional call
+            ]
+        )
         shards = AsyncMock()
-        shards.shard_for_group.side_effect = AsyncMock(return_value=7)
+        shards.shard_for_group = AsyncMock(return_value=7)
+        sched  = Scheduler(redis, registry, shards, _cfg(region="eu-west-1"))
 
-        sched = Scheduler(redis, registry, shards, _cfg(region="eu-west-1"))
         evt = _event(policy="REGION_AFFINITY", region="eu-west-1")
         group = sched._policy_region_affinity([eu_worker, us_worker], evt)
         assert group == "eu-grp"
@@ -147,6 +159,7 @@ class TestSchedulerPlacement:
         evt   = _event(agent_type="gpu_coder")
         sched = Scheduler(None, AsyncMock(), AsyncMock(), _cfg())
         group = sched._policy_capability_match([capable, incapable], evt)
+        # No exact match → falls back to least loaded (incapable is eligible)
         assert group in ("gpu-grp", "cpu-grp")
 
         capable.capabilities = ["python", "gpu", "gpu_coder"]
@@ -197,11 +210,7 @@ class TestSchedulerPlacement:
     async def test_placement_error_when_no_healthy_workers(self):
         redis    = faredis.FakeRedis()
         registry = AsyncMock()
-
-        async def mock_empty_workers(*args, **kwargs):
-            return []
-        registry.list_healthy_workers.side_effect = mock_empty_workers
-
+        registry.list_healthy_workers = AsyncMock(return_value=[])
         sched    = Scheduler(redis, registry, AsyncMock(), _cfg())
         await sched._schedule(_event(run_id="run-fail-001"))
         state = await redis.get("hfa:run:state:run-fail-001")

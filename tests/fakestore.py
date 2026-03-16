@@ -59,11 +59,12 @@ class FakeRedis:
     async def delete(self, *keys: str) -> int:
         count = 0
         for k in keys:
-            if k in self._strings:
-                del self._strings[k]
+            k_str = k.decode() if isinstance(k, bytes) else k
+            if k_str in self._strings:
+                del self._strings[k_str]
                 count += 1
-            if k in self._hashes:
-                del self._hashes[k]
+            if k_str in self._hashes:
+                del self._hashes[k_str]
                 count += 1
         return count
 
@@ -124,8 +125,9 @@ class FakeRedis:
         return val.encode() if val is not None else None
 
     async def hgetall(self, key: str) -> Dict[bytes, bytes]:
-        h = self._hashes.get(key, {})
-        return {k.encode(): v.encode() for k, v in h.items()}
+        k = key.decode() if isinstance(key, bytes) else key
+        h = self._hashes.get(k, {})
+        return {kk.encode(): vv.encode() for kk, vv in h.items()}
 
     # ------------------------------------------------------------------ #
     # Set commands
@@ -171,6 +173,11 @@ class FakeRedis:
         lo = float(min_score)
         hi = float(max_score)
         return [m.encode() for m, s in z.items() if lo <= s <= hi]
+
+    async def zscore(self, key: str, member: str) -> Optional[float]:
+        m = member.decode() if isinstance(member, bytes) else member
+        z = self._zsets.get(key, {})
+        return z.get(m)
 
     async def zrange(self, key: str, start: int, stop: int,
                      withscores: bool = False):
