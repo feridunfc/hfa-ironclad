@@ -600,7 +600,8 @@ async def diagnostics_recovery(
             w for w in await cp.registry.list_healthy_workers() if w.is_draining
         ]
     except Exception:
-        schedulable = []; draining = []
+        schedulable = []
+        draining = []
     return {
         "dlq_depth": dlq_depth,
         "schedulable_workers": len(schedulable),

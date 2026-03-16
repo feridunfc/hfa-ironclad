@@ -24,7 +24,7 @@ from fakeredis.aioredis import FakeRedis
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "hfa-core" / "src"))
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "hfa-control" / "src"))
 
-from hfa_control.api.models import WorkerListResponse, WorkerSummary, WorkerResponse
+from hfa_control.api.models import WorkerListResponse, WorkerSummary
 from hfa_control.models import ControlPlaneConfig, WorkerProfile, WorkerStatus
 from hfa_control.registry import WorkerRegistry
 

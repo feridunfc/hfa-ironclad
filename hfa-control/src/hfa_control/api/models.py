@@ -22,7 +22,7 @@ try:
                 return self.dict()  # pydantic v1 fallback
 
 except ImportError:
-    from dataclasses import dataclass, asdict, field as _field
+    from dataclasses import dataclass, asdict
 
     class _ModelMixin:  # type: ignore[no-redef]
         """dataclass-based shim when Pydantic is absent."""
@@ -42,8 +42,7 @@ def _model(cls):
         from pydantic import BaseModel
         return cls
     except ImportError:
-        from dataclasses import dataclass, field
-        import typing, inspect
+        from dataclasses import dataclass
         # Add default_factory for mutable defaults
         return dataclass(cls)
 
