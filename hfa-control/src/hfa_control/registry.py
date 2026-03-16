@@ -85,10 +85,10 @@ class WorkerRegistry:
         self, region: Optional[str] = None
     ) -> List[WorkerProfile]:
         """
-        Return workers with status HEALTHY in the given region.
-        If region is None, returns healthy workers across all regions.
+        Return workers with status HEALTHY or DRAINING in the given region.
         Workers whose last_seen is older than worker_heartbeat_ttl are
         classified as DEAD and excluded.
+        If region is None, returns workers across all regions.
         """
         if region:
             raw_ids = await self._redis.smembers(
@@ -109,10 +109,20 @@ class WorkerRegistry:
             age = now - profile.last_seen
             if age > self._config.worker_heartbeat_ttl:
                 profile.status = WorkerStatus.DEAD
-            if profile.status == WorkerStatus.HEALTHY:
+            if profile.status in (WorkerStatus.HEALTHY, WorkerStatus.DRAINING):
                 profiles.append(profile)
 
         return profiles
+
+    async def list_schedulable_workers(
+        self, region: Optional[str] = None
+    ) -> List[WorkerProfile]:
+        """
+        Return only workers eligible to receive new runs:
+        HEALTHY status and not draining.
+        """
+        all_workers = await self.list_healthy_workers(region=region)
+        return [w for w in all_workers if w.status == WorkerStatus.HEALTHY and not w.is_draining]
 
     async def get_worker(self, worker_id: str) -> WorkerProfile:
         raw = await self._redis.hgetall(f"hfa:cp:worker:{worker_id}")
@@ -208,6 +218,11 @@ class WorkerRegistry:
 
     async def _on_heartbeat(self, event: WorkerHeartbeatEvent) -> None:
         key = f"hfa:cp:worker:{event.worker_id}"
+        # Read is_draining from the raw stream data stored alongside the event.
+        # WorkerHeartbeatPublisher injects is_draining as an extra field on the
+        # serialised dict — it is not part of the WorkerHeartbeatEvent dataclass.
+        # We reconstruct it from the Redis hash after writing, so we preserve the
+        # value if already set (e.g. by a prior WorkerDrainingEvent).
         mapping = {
             "worker_id":    event.worker_id,
             "worker_group": event.worker_group,
@@ -215,19 +230,29 @@ class WorkerRegistry:
             "shards":       json.dumps(event.shards),
             "capacity":     str(event.capacity),
             "inflight":     str(event.inflight),
-            "status":       WorkerStatus.HEALTHY.value,
             "last_seen":    str(event.timestamp),
             "version":      event.version,
             "capabilities": json.dumps(event.capabilities),
         }
+        # Preserve DRAINING status if already set; otherwise mark HEALTHY.
+        existing_raw = await self._redis.hget(key, "status")
+        existing_status = (
+            existing_raw.decode() if isinstance(existing_raw, bytes) else existing_raw
+        ) or ""
+        if existing_status == WorkerStatus.DRAINING.value:
+            mapping["status"] = WorkerStatus.DRAINING.value
+        else:
+            mapping["status"] = WorkerStatus.HEALTHY.value
+
         await self._redis.hset(key, mapping=mapping)
         await self._redis.expire(key, self._config.registry_ttl)
         await self._redis.sadd(
             f"hfa:cp:workers:by_region:{event.region}", event.worker_id
         )
         logger.debug(
-            "Heartbeat: worker=%s inflight=%d/%d region=%s",
+            "Heartbeat: worker=%s inflight=%d/%d region=%s status=%s",
             event.worker_id, event.inflight, event.capacity, event.region,
+            mapping["status"],
         )
 
     async def _on_draining(self, event: WorkerDrainingEvent) -> None:
