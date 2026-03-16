@@ -114,27 +114,22 @@ class WorkerRegistry:
         return profiles
 
     async def list_schedulable_workers(
-        self, region: Optional[str] = None
+            self, region: Optional[str] = None
     ) -> List[WorkerProfile]:
         """
         Return only workers eligible to receive new runs.
 
         A worker is schedulable when ALL of the following hold:
-          - status is HEALTHY (not dead, not degraded)
-          - not draining (is_draining is False)
-          - has available capacity (inflight < capacity)
+          - healthy
+          - not draining
+          - capacity > 0
+          - inflight < capacity
 
-        This is the authoritative definition; the scheduler uses this list
-        so that draining or saturated workers never receive new placements.
+        This method is stricter than list_healthy_workers() and is safe for both
+        object-style and dict-style worker records.
         """
         all_workers = await self.list_healthy_workers(region=region)
-        return [
-            w
-            for w in all_workers
-            if w.status == WorkerStatus.HEALTHY
-            and not w.is_draining
-            and w.available_slots > 0
-        ]
+        return [w for w in all_workers if self._worker_is_schedulable(w)]
 
     async def get_worker(self, worker_id: str) -> WorkerProfile:
         raw = await self._redis.hgetall(f"hfa:cp:worker:{worker_id}")
@@ -280,3 +275,109 @@ class WorkerRegistry:
             event.drain_deadline_utc,
             event.reason,
         )
+
+
+    def _status_value_of(self, worker) -> str:
+        status = None
+
+        if hasattr(worker, "status"):
+            status = worker.status
+        elif isinstance(worker, dict):
+            status = worker.get("status")
+
+        if status is None:
+            return ""
+
+        if hasattr(status, "value"):
+            return str(status.value).lower()
+
+        return str(status).lower()
+
+
+    def _capacity_of(self, worker) -> int:
+        value = None
+
+        if hasattr(worker, "capacity"):
+            value = worker.capacity
+        elif isinstance(worker, dict):
+            value = worker.get("capacity", 0)
+        else:
+            value = 0
+
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+
+    def _inflight_of(self, worker) -> int:
+        value = None
+
+        if hasattr(worker, "inflight"):
+            value = worker.inflight
+        elif isinstance(worker, dict):
+            value = worker.get("inflight", 0)
+        else:
+            value = 0
+
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+
+    def _load_factor_of(self, worker) -> float:
+        capacity = self._capacity_of(worker)
+        if capacity <= 0:
+            return float("inf")
+
+        inflight = self._inflight_of(worker)
+        if inflight >= capacity:
+            return float("inf")
+
+        return inflight / capacity
+
+
+    def _worker_is_schedulable(self, worker) -> bool:
+        status = self._status_value_of(worker)
+
+        if status in {"dead", "degraded", "draining"}:
+            return False
+
+        capacity = self._capacity_of(worker)
+        if capacity <= 0:
+            return False
+
+        inflight = self._inflight_of(worker)
+        if inflight >= capacity:
+            return False
+
+        return True
+
+
+    def _capability_matches(self, requirement, worker_capability) -> bool:
+        if isinstance(worker_capability, list):
+            if not isinstance(requirement, str):
+                return False
+            return requirement in worker_capability
+
+        if isinstance(worker_capability, dict):
+            if isinstance(requirement, str):
+                return requirement in worker_capability
+
+            if isinstance(requirement, dict):
+                for req_key, req_value in requirement.items():
+                    if req_key not in worker_capability:
+                        return False
+
+                    worker_value = worker_capability[req_key]
+
+                    if req_value is None or req_value == "":
+                        continue
+
+                    if worker_value != req_value:
+                        return False
+
+                return True
+
+        return False
