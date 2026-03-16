@@ -12,7 +12,6 @@ Verifies:
 """
 from __future__ import annotations
 
-import pytest
 
 from hfa.events.codec import (
     deserialize_run_completed,

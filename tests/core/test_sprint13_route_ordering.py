@@ -1,6 +1,6 @@
-"""
+﻿"""
 tests/core/test_sprint13_route_ordering.py
-IRONCLAD Sprint 13 — Route ordering and security matrix tests
+IRONCLAD Sprint 13 â€” Route ordering and security matrix tests
 
 Verifies the critical FastAPI route-ordering rule:
   Static paths (/workers/healthy, /workers/schedulable, /runs/running)
@@ -28,7 +28,7 @@ from fakeredis.aioredis import FakeRedis
 
 
 # ---------------------------------------------------------------------------
-# Route ordering — verified by inspecting router route list
+# Route ordering â€” verified by inspecting router route list
 # ---------------------------------------------------------------------------
 
 def test_workers_healthy_route_before_worker_id():
@@ -133,7 +133,7 @@ def test_sprint10_routes_preserved():
 
 
 # ---------------------------------------------------------------------------
-# Schedulable semantics — inflight < capacity
+# Schedulable semantics â€” inflight < capacity
 # ---------------------------------------------------------------------------
 
 import time
@@ -217,7 +217,7 @@ async def test_schedulable_includes_partially_loaded():
         instance_id="cp", worker_heartbeat_ttl=60.0, registry_ttl=120
     )
     reg = WorkerRegistry(redis, cfg)
-    # inflight=9, capacity=10 → 1 available slot → still schedulable
+    # inflight=9, capacity=10 â†’ 1 available slot â†’ still schedulable
     await _seed(redis, "w-near-full", status="healthy", inflight=9, capacity=10)
 
     schedulable = await reg.list_schedulable_workers()
@@ -226,7 +226,7 @@ async def test_schedulable_includes_partially_loaded():
 
 
 # ---------------------------------------------------------------------------
-# Security matrix — route handler names indicate correct auth gates
+# Security matrix â€” route handler names indicate correct auth gates
 # ---------------------------------------------------------------------------
 
 def test_operator_routes_use_require_operator():
@@ -252,7 +252,7 @@ def test_operator_routes_use_require_operator():
         assert fn is not None, f"Handler {name!r} not found in router"
         src = inspect.getsource(fn)
         assert "_require_operator" in src, (
-            f"Handler {name!r} does not call _require_operator — "
+            f"Handler {name!r} does not call _require_operator â€” "
             "it should be operator-only"
         )
 
