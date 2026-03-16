@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-
+import time
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "hfa-core" / "src"))
@@ -131,7 +131,7 @@ def test_sprint10_routes_preserved():
 # Schedulable semantics â€” inflight < capacity
 # ---------------------------------------------------------------------------
 
-import time
+
 
 
 async def _seed(redis, wid, status="healthy", inflight=0, capacity=10):
