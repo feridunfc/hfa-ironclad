@@ -118,11 +118,23 @@ class WorkerRegistry:
         self, region: Optional[str] = None
     ) -> List[WorkerProfile]:
         """
-        Return only workers eligible to receive new runs:
-        HEALTHY status and not draining.
+        Return only workers eligible to receive new runs.
+
+        A worker is schedulable when ALL of the following hold:
+          - status is HEALTHY (not dead, not degraded)
+          - not draining (is_draining is False)
+          - has available capacity (inflight < capacity)
+
+        This is the authoritative definition; the scheduler uses this list
+        so that draining or saturated workers never receive new placements.
         """
         all_workers = await self.list_healthy_workers(region=region)
-        return [w for w in all_workers if w.status == WorkerStatus.HEALTHY and not w.is_draining]
+        return [
+            w for w in all_workers
+            if w.status == WorkerStatus.HEALTHY
+            and not w.is_draining
+            and w.available_slots > 0
+        ]
 
     async def get_worker(self, worker_id: str) -> WorkerProfile:
         raw = await self._redis.hgetall(f"hfa:cp:worker:{worker_id}")

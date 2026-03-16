@@ -70,14 +70,16 @@ def _event(
     )
 
 
-async def _make_sched(redis, workers, shard=4) -> Scheduler:
+async def _make_sched(redis, workers, shard=4, schedulable_workers=None) -> Scheduler:
     registry = AsyncMock()
     registry.list_healthy_workers = AsyncMock(return_value=workers)
-    shards   = AsyncMock()
+    registry.list_schedulable_workers = AsyncMock(
+        return_value=workers if schedulable_workers is None else schedulable_workers
+    )
+    shards = AsyncMock()
     shards.shard_for_group = AsyncMock(return_value=shard)
-    cfg      = _cfg()
-    sched    = Scheduler(redis, registry, shards, cfg)
-    return sched
+    cfg = _cfg()
+    return Scheduler(redis, registry, shards, cfg)
 
 
 # ── Test class ────────────────────────────────────────────────────────────────

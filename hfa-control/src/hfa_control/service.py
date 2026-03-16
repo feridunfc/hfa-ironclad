@@ -360,19 +360,3 @@ def _config_from_env() -> ControlPlaneConfig:
             os.environ.get("MAX_RESCHEDULE_ATTEMPTS", "3")
         ),
     )
-    return ControlPlaneConfig(
-        region=os.environ.get("CP_REGION", "us-east-1"),
-        instance_id=os.environ.get("CP_INSTANCE_ID", ""),
-        worker_heartbeat_ttl=float(
-            os.environ.get("WORKER_HEARTBEAT_TTL", "30")
-        ),
-        stale_run_timeout=float(
-            os.environ.get("STALE_RUN_TIMEOUT", "600")
-        ),
-        recovery_sweep_interval=float(
-            os.environ.get("RECOVERY_SWEEP_INTERVAL", "30")
-        ),
-        max_reschedule_attempts=int(
-            os.environ.get("MAX_RESCHEDULE_ATTEMPTS", "3")
-        ),
-    )
