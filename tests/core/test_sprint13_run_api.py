@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
-from fakestore import FakeRedis
+from fakeredis.aioredis import FakeRedis
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "hfa-core" / "src"))
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "hfa-control" / "src"))
