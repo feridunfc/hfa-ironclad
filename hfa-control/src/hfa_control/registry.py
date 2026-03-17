@@ -34,7 +34,7 @@ import logging
 import time
 from typing import List, Optional
 
-from hfa.events.schema import WorkerHeartbeatEvent, WorkerDrainingEvent
+from hfa.events.schema import WorkerDrainingEvent, WorkerHeartbeatEvent
 
 try:
     from hfa.obs.tracing import get_tracer  # type: ignore[attr-defined]
@@ -43,8 +43,8 @@ try:
 except Exception:
     _tracer = None  # graceful no-op if OTel not configured
 
-from hfa_control.models import WorkerProfile, WorkerStatus, ControlPlaneConfig
 from hfa_control.exceptions import WorkerNotFoundError
+from hfa_control.models import ControlPlaneConfig, WorkerProfile, WorkerStatus
 
 logger = logging.getLogger(__name__)
 
@@ -114,14 +114,13 @@ class WorkerRegistry:
         return profiles
 
     async def list_schedulable_workers(
-            self, region: Optional[str] = None
+        self, region: Optional[str] = None
     ) -> List[WorkerProfile]:
         """
         Return only workers eligible to receive new runs.
 
         A worker is schedulable when ALL of the following hold:
           - status is HEALTHY (not dead, not degraded)
-<<<<<<< feature/sprint14a-scheduling-foundation
           - not draining
           - capacity > 0
           - inflight < capacity
@@ -133,22 +132,6 @@ class WorkerRegistry:
         """
         all_workers = await self.list_healthy_workers(region=region)
         return [w for w in all_workers if self._worker_is_schedulable(w)]
-=======
-          - not draining (is_draining is False)
-          - has available capacity (inflight < capacity)
-
-        This is the authoritative definition; the scheduler uses this list
-        so that draining or saturated workers never receive new placements.
-        """
-        all_workers = await self.list_healthy_workers(region=region)
-        return [
-            w
-            for w in all_workers
-            if w.status == WorkerStatus.HEALTHY
-            and not w.is_draining
-            and w.available_slots > 0
-        ]
->>>>>>> main
 
     async def get_worker(self, worker_id: str) -> WorkerProfile:
         raw = await self._redis.hgetall(f"hfa:cp:worker:{worker_id}")
@@ -189,7 +172,6 @@ class WorkerRegistry:
         consumer = f"registry-{self._config.instance_id}"
         while True:
             try:
-                # Reclaim idle PEL entries first (crash recovery)
                 await self._autoclaim(consumer)
 
                 msgs = await self._redis.xreadgroup(
@@ -222,7 +204,6 @@ class WorkerRegistry:
                 start_id="0-0",
                 count=self._config.autoclaim_count,
             )
-            # result = (next_start_id, [(msg_id, data), ...], [deleted_ids])
             if result and result[1]:
                 for msg_id, data in result[1]:
                     await self._handle(data)
@@ -230,7 +211,6 @@ class WorkerRegistry:
                         self._config.heartbeat_stream, _GROUP, msg_id
                     )
         except Exception as exc:
-            # XAUTOCLAIM may not be available on Redis < 6.2 — degrade gracefully
             logger.debug("WorkerRegistry._autoclaim skipped: %s", exc)
 
     async def _handle(self, data: dict) -> None:
@@ -244,11 +224,6 @@ class WorkerRegistry:
 
     async def _on_heartbeat(self, event: WorkerHeartbeatEvent) -> None:
         key = f"hfa:cp:worker:{event.worker_id}"
-        # Read is_draining from the raw stream data stored alongside the event.
-        # WorkerHeartbeatPublisher injects is_draining as an extra field on the
-        # serialised dict — it is not part of the WorkerHeartbeatEvent dataclass.
-        # We reconstruct it from the Redis hash after writing, so we preserve the
-        # value if already set (e.g. by a prior WorkerDrainingEvent).
         mapping = {
             "worker_id": event.worker_id,
             "worker_group": event.worker_group,
@@ -260,7 +235,7 @@ class WorkerRegistry:
             "version": event.version,
             "capabilities": json.dumps(event.capabilities),
         }
-        # Preserve DRAINING status if already set; otherwise mark HEALTHY.
+
         existing_raw = await self._redis.hget(key, "status")
         existing_status = (
             existing_raw.decode() if isinstance(existing_raw, bytes) else existing_raw
@@ -295,7 +270,6 @@ class WorkerRegistry:
             event.reason,
         )
 
-
     def _status_value_of(self, worker) -> str:
         status = None
 
@@ -312,7 +286,6 @@ class WorkerRegistry:
 
         return str(status).lower()
 
-
     def _capacity_of(self, worker) -> int:
         value = None
 
@@ -327,7 +300,6 @@ class WorkerRegistry:
             return int(value)
         except (TypeError, ValueError):
             return 0
-
 
     def _inflight_of(self, worker) -> int:
         value = None
@@ -344,7 +316,6 @@ class WorkerRegistry:
         except (TypeError, ValueError):
             return 0
 
-
     def _load_factor_of(self, worker) -> float:
         capacity = self._capacity_of(worker)
         if capacity <= 0:
@@ -355,7 +326,6 @@ class WorkerRegistry:
             return float("inf")
 
         return inflight / capacity
-
 
     def _worker_is_schedulable(self, worker) -> bool:
         status = self._status_value_of(worker)
@@ -372,7 +342,6 @@ class WorkerRegistry:
             return False
 
         return True
-
 
     def _capability_matches(self, requirement, worker_capability) -> bool:
         if isinstance(worker_capability, list):
