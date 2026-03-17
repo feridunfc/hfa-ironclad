@@ -121,6 +121,7 @@ class WorkerRegistry:
 
         A worker is schedulable when ALL of the following hold:
           - status is HEALTHY (not dead, not degraded)
+<<<<<<< feature/sprint14a-scheduling-foundation
           - not draining
           - capacity > 0
           - inflight < capacity
@@ -132,6 +133,22 @@ class WorkerRegistry:
         """
         all_workers = await self.list_healthy_workers(region=region)
         return [w for w in all_workers if self._worker_is_schedulable(w)]
+=======
+          - not draining (is_draining is False)
+          - has available capacity (inflight < capacity)
+
+        This is the authoritative definition; the scheduler uses this list
+        so that draining or saturated workers never receive new placements.
+        """
+        all_workers = await self.list_healthy_workers(region=region)
+        return [
+            w
+            for w in all_workers
+            if w.status == WorkerStatus.HEALTHY
+            and not w.is_draining
+            and w.available_slots > 0
+        ]
+>>>>>>> main
 
     async def get_worker(self, worker_id: str) -> WorkerProfile:
         raw = await self._redis.hgetall(f"hfa:cp:worker:{worker_id}")
