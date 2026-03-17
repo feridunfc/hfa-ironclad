@@ -47,6 +47,7 @@ from hfa.events.schema import (
 from hfa.events.codec import serialize_event
 from hfa_control.models import ControlPlaneConfig
 from hfa_control.exceptions import DLQEntryNotFoundError, TenantMismatchError
+from hfa.runtime.tenant_utils import decrement_tenant_inflight_if_needed
 
 try:
     from hfa.obs.runtime_metrics import IRONCLADMetrics as _M
@@ -294,7 +295,7 @@ class RecoveryService:
             maxlen=10_000,
             approximate=True,
         )
-
+        await decrement_tenant_inflight_if_needed(self._redis, run_id)
         logger.error(
             "DLQ: run=%s tenant=%s reason=%s attempts=%d",
             run_id,
