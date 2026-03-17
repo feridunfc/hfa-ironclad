@@ -51,6 +51,7 @@ jobs:
           pip install -e ./hfa-core
           pip install -e ./hfa-control
           pip install -e ./hfa-worker
+          pip install -e ./hfa-tools
 
       - name: Set PYTHONPATH
         run: |
