@@ -34,12 +34,13 @@ import logging
 import time
 from typing import List, Optional
 
-from hfa.events.schema import RunAdmittedEvent, RunScheduledEvent, RunRequestedEvent
 from hfa.events.codec import serialize_event
-from hfa_control.models import WorkerProfile, ControlPlaneConfig
+from hfa.events.schema import RunAdmittedEvent, RunRequestedEvent, RunScheduledEvent
+from hfa_control.exceptions import PlacementError
+from hfa_control.fairness import FairnessSelector
+from hfa_control.models import ControlPlaneConfig, WorkerProfile
 from hfa_control.registry import WorkerRegistry
 from hfa_control.shard import ShardOwnershipManager
-from hfa_control.exceptions import PlacementError
 
 try:
     from hfa.obs.runtime_metrics import IRONCLADMetrics as _M
@@ -72,6 +73,9 @@ class Scheduler:
         self._config = config
         self._task: Optional[asyncio.Task] = None
         self._rr_counter = 0  # round-robin state
+
+        # Sprint 14A: fairness-ready, but not actively used yet
+        self._fairness = FairnessSelector()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -110,7 +114,6 @@ class Scheduler:
         consumer = f"scheduler-{self._config.instance_id}"
         while True:
             try:
-                # XAUTOCLAIM — recover PEL entries from dead CP instances
                 await self._autoclaim(consumer)
 
                 msgs = await self._redis.xreadgroup(
@@ -176,7 +179,6 @@ class Scheduler:
                 shard = await self._shards.shard_for_group(worker_group, event.run_id)
                 stream = f"hfa:stream:runs:{shard}"
 
-                # Write run metadata
                 await self._redis.hset(
                     f"hfa:run:meta:{event.run_id}",
                     mapping={
@@ -194,13 +196,11 @@ class Scheduler:
                     f"hfa:run:state:{event.run_id}", "scheduled", ex=86400
                 )
 
-                # Track in running ZSET for recovery sweep
                 await self._redis.zadd(
                     self._config.running_zset,
                     {event.run_id: time.time()},
                 )
 
-                # Emit RunScheduledEvent to control stream (observability)
                 sched_evt = RunScheduledEvent(
                     run_id=event.run_id,
                     tenant_id=event.tenant_id,
@@ -216,7 +216,6 @@ class Scheduler:
                     approximate=True,
                 )
 
-                # XADD RunRequestedEvent to target shard stream
                 run_evt = RunRequestedEvent(
                     run_id=event.run_id,
                     tenant_id=event.tenant_id,
@@ -270,12 +269,10 @@ class Scheduler:
 
         region = event.preferred_region or self._config.region
 
-        # Use schedulable (non-draining) workers only.
         workers = await self._registry.list_schedulable_workers(region=region)
         if not workers:
             workers = await self._registry.list_schedulable_workers(region=None)
 
-        # Count draining workers that were excluded for observability.
         all_alive = await self._registry.list_healthy_workers(region=None)
         draining_count = sum(1 for w in all_alive if w.is_draining)
         if _M and draining_count:
@@ -325,7 +322,6 @@ class Scheduler:
         available = [w for w in workers if w.available_slots > 0]
         if not available:
             raise PlacementError("No workers with available slots (round-robin)")
-        # Deduplicate groups preserving insertion order
         seen: list[str] = []
         groups: list[WorkerProfile] = []
         for w in available:
