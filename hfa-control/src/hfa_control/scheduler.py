@@ -33,7 +33,11 @@ import asyncio
 import logging
 import time
 from typing import List, Optional
+<<<<<<< feature/sprint14a-scheduling-foundation
 from hfa_control.fairness import FairnessSelector
+=======
+
+>>>>>>> main
 from hfa.events.schema import RunAdmittedEvent, RunScheduledEvent, RunRequestedEvent
 from hfa.events.codec import serialize_event
 from hfa_control.models import WorkerProfile, ControlPlaneConfig
@@ -269,6 +273,7 @@ class Scheduler:
     async def _select_worker_group(self, event: RunAdmittedEvent, policy: str) -> str:
         if _M:
             _M.scheduling_attempts_total.inc()
+<<<<<<< feature/sprint14a-scheduling-foundation
 
         region = event.preferred_region or self._config.region
 
@@ -299,6 +304,38 @@ class Scheduler:
             return self._policy_capability_match(workers, event)
         return self._policy_least_loaded(workers)
 
+=======
+
+        region = event.preferred_region or self._config.region
+
+        # Use schedulable (non-draining) workers only.
+        workers = await self._registry.list_schedulable_workers(region=region)
+        if not workers:
+            workers = await self._registry.list_schedulable_workers(region=None)
+
+        # Count draining workers that were excluded for observability.
+        all_alive = await self._registry.list_healthy_workers(region=None)
+        draining_count = sum(1 for w in all_alive if w.is_draining)
+        if _M and draining_count:
+            _M.workers_excluded_draining_total.inc(draining_count)
+
+        if not workers:
+            if _M:
+                _M.scheduling_failures_total.inc()
+            raise PlacementError(
+                f"No schedulable workers available for run={event.run_id!r} "
+                f"region={region!r} (draining_excluded={draining_count})"
+            )
+
+        if policy == "REGION_AFFINITY":
+            return self._policy_region_affinity(workers, event)
+        if policy == "ROUND_ROBIN":
+            return self._policy_round_robin(workers)
+        if policy == "CAPABILITY_MATCH":
+            return self._policy_capability_match(workers, event)
+        return self._policy_least_loaded(workers)
+
+>>>>>>> main
     def _policy_least_loaded(self, workers: List[WorkerProfile]) -> str:
         """Select worker group with lowest inflight / capacity ratio."""
         workers = [w for w in workers if w.available_slots > 0]
