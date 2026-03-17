@@ -1,16 +1,18 @@
 """
 hfa-control/src/hfa_control/admission.py
-IRONCLAD Sprint 10 — Admission Controller
+IRONCLAD Sprint 10/14B — Admission Controller
 
 Gate order (Sprint 5/9 contracts preserved, now centralised here)
 -----------------------------------------------------------------
-  1. validate_run_id_format        (Sprint 5)
-  2. tenant cross-check            (Sprint 5)
-  3. QuotaManager.check_and_increment_runs  (Sprint 9)
-  4. QuotaManager.check_rate_limit          (Sprint 9)
-  5. QuotaManager.check_and_reserve_budget  (Sprint 9 v2 — atomic Lua)
-  6. Emit RunAdmittedEvent → hfa:stream:control
-  7. Set hfa:run:state:{run_id} = 'admitted'
+  1. validate_run_id_format                 (Sprint 5)
+  2. tenant cross-check                     (Sprint 5)
+  3. tenant inflight limit                  (Sprint 14B)
+  4. tenant rate limit                      (Sprint 14B)
+  5. QuotaManager.check_and_increment_runs  (Sprint 9)
+  6. QuotaManager.check_rate_limit          (Sprint 9)
+  7. QuotaManager.check_and_reserve_budget  (Sprint 9 v2 — atomic Lua)
+  8. Emit RunAdmittedEvent → hfa:stream:control
+  9. Set hfa:run:state:{run_id} = 'admitted'
 
 On any gate failure the quota rollback is performed before raising.
 
@@ -24,33 +26,37 @@ IRONCLAD rules
 from __future__ import annotations
 
 import logging
+import time
+from typing import Optional
 
-from hfa.events.schema import RunAdmittedEvent
 from hfa.events.codec import serialize_event
+from hfa.events.schema import RunAdmittedEvent
 
 try:
     from hfa.governance.quota_manager import QuotaManager  # type: ignore
-    from hfa_tools.middleware.tenant import validate_run_id_format  # type: ignore
     from hfa_tools.middleware.tenant import TenantFormatError  # type: ignore
+    from hfa_tools.middleware.tenant import validate_run_id_format  # type: ignore
 except ImportError:
-    # Allow isolated testing without full hfa-tools dependency
     QuotaManager = None  # type: ignore
     validate_run_id_format = None  # type: ignore
     TenantFormatError = Exception
 
 try:
-    from hfa.obs.tracing import get_tracer, HFATracing  # type: ignore
+    from hfa.obs.tracing import HFATracing, get_tracer  # type: ignore
 
     _tracer = get_tracer("hfa.admission")
 except Exception:
     _tracer = None
+    HFATracing = None  # type: ignore
 
 from hfa_control.exceptions import (
     AdmissionError,
+    BudgetExceededError,
     QuotaExceededError,
     RateLimitedError,
-    BudgetExceededError,
 )
+from hfa_control.rate_limit import TenantRateLimiter
+from hfa_control.tenant_registry import TenantRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +78,86 @@ def _noop_span():
 
 
 class AdmissionController:
-    def __init__(self, redis, config) -> None:
+    def __init__(
+        self,
+        redis,
+        config,
+        tenant_registry: Optional[TenantRegistry] = None,
+        rate_limiter: Optional[TenantRateLimiter] = None,
+    ) -> None:
         self._redis = redis
         self._config = config
         self._quota = QuotaManager(redis) if QuotaManager else None
+        self._tenant_registry = tenant_registry
+        self._rate_limiter = rate_limiter
+
+    async def _tenant_inflight_allowed(
+        self, tenant_id: str
+    ) -> tuple[bool, Optional[str]]:
+        """
+        Returns (allowed, reason).
+        """
+        if not self._tenant_registry:
+            return True, None
+
+        config = await self._tenant_registry.get_config(tenant_id)
+        if config.max_inflight_runs is None:
+            return True, None
+
+        inflight = await self._tenant_registry.get_inflight(tenant_id)
+        if inflight >= config.max_inflight_runs:
+            return False, "tenant_inflight_limit_exceeded"
+
+        return True, None
+
+    async def _tenant_rate_allowed(
+        self, tenant_id: str
+    ) -> tuple[bool, Optional[str]]:
+        """
+        Returns (allowed, reason).
+        """
+        if not self._tenant_registry or not self._rate_limiter:
+            return True, None
+
+        config = await self._tenant_registry.get_config(tenant_id)
+        if config.max_runs_per_second is None:
+            return True, None
+
+        allowed = await self._rate_limiter.check_and_consume(
+            tenant_id,
+            config.max_runs_per_second,
+        )
+        if not allowed:
+            return False, "tenant_rate_limit_exceeded"
+
+        return True, None
+
+    async def _reject_run(self, request, reason: str) -> None:
+        """
+        Mark run rejected with explicit reason.
+        No event emitted - run stops here.
+        """
+        run_id = request.run_id
+
+        await self._redis.set(f"hfa:run:state:{run_id}", "rejected", ex=86400)
+        await self._redis.hset(
+            f"hfa:run:meta:{run_id}",
+            mapping={
+                "run_id": run_id,
+                "tenant_id": request.tenant_id,
+                "agent_type": request.agent_type,
+                "rejection_reason": reason,
+                "rejected_at": str(time.time()),
+            },
+        )
+        await self._redis.expire(f"hfa:run:meta:{run_id}", 86400)
+
+        logger.info(
+            "Run rejected: run=%s tenant=%s reason=%s",
+            run_id,
+            request.tenant_id,
+            reason,
+        )
 
     async def admit(self, request) -> str:
         """
@@ -89,6 +171,9 @@ class AdmissionController:
           .preferred_region (str, optional),
           .preferred_placement (str, optional)
         """
+        incremented_tenant_inflight = False
+        incremented_system_runs = False
+
         span = (
             _tracer.start_as_current_span("hfa.admission.admit")
             if _tracer
@@ -113,36 +198,66 @@ class AdmissionController:
                     except TenantFormatError as exc:
                         raise AdmissionError(str(exc)) from exc
 
-                # Gate 3: concurrent run quota
+                # Gate 3: tenant inflight limit
+                allowed, reason = await self._tenant_inflight_allowed(
+                    request.tenant_id
+                )
+                if not allowed:
+                    await self._reject_run(request, reason or "tenant_rejected")
+                    raise QuotaExceededError(
+                        f"Tenant inflight limit exceeded: {request.tenant_id!r}"
+                    )
+
+                # Gate 4: tenant rate limit
+                allowed, reason = await self._tenant_rate_allowed(request.tenant_id)
+                if not allowed:
+                    await self._reject_run(request, reason or "tenant_rejected")
+                    raise RateLimitedError(
+                        f"Tenant rate limit exceeded: {request.tenant_id!r}"
+                    )
+
+                # Gate 5: concurrent run quota
                 if self._quota:
                     if not await self._quota.check_and_increment_runs(
                         request.tenant_id
                     ):
+                        await self._reject_run(request, "system_quota_exceeded")
                         raise QuotaExceededError(
                             f"Concurrent run limit exceeded: {request.tenant_id!r}"
                         )
+                    incremented_system_runs = True
 
-                # Gate 4: rate limit
+                # Gate 6: system rate limit
                 if self._quota:
                     if not await self._quota.check_rate_limit(request.tenant_id):
-                        # rollback concurrent counter
                         await self._quota.decrement_runs(request.tenant_id)
+                        incremented_system_runs = False
+                        await self._reject_run(request, "system_rate_limit_exceeded")
                         raise RateLimitedError(
                             f"RPM limit exceeded: {request.tenant_id!r}"
                         )
 
-                # Gate 5: atomic budget reserve
+                # Gate 7: atomic budget reserve
                 estimated = int(getattr(request, "estimated_cost_cents", 0))
                 if self._quota and estimated > 0:
                     if not await self._quota.check_and_reserve_budget(
                         request.tenant_id, estimated
                     ):
-                        await self._quota.decrement_runs(request.tenant_id)
+                        if incremented_system_runs:
+                            await self._quota.decrement_runs(request.tenant_id)
+                            incremented_system_runs = False
+                        await self._reject_run(request, "budget_exceeded")
                         raise BudgetExceededError(
                             f"Budget exceeded: {request.tenant_id!r}"
                         )
+                else:
+                    estimated = int(getattr(request, "estimated_cost_cents", 0))
 
-                # Emit RunAdmittedEvent
+                # All gates passed → tenant inflight commit
+                if self._tenant_registry:
+                    await self._tenant_registry.increment_inflight(request.tenant_id)
+                    incremented_tenant_inflight = True
+
                 evt = RunAdmittedEvent(
                     run_id=request.run_id,
                     tenant_id=request.tenant_id,
@@ -160,10 +275,9 @@ class AdmissionController:
                     ),
                 )
 
-                # Inject W3C trace context if OTel available
                 try:
                     if HFATracing:
-                        HFATracing.inject_trace_context(evt)  # type: ignore
+                        HFATracing.inject_trace_context(evt)  # type: ignore[attr-defined]
                 except Exception:
                     pass
 
@@ -174,7 +288,9 @@ class AdmissionController:
                     approximate=True,
                 )
                 await self._redis.set(
-                    f"hfa:run:state:{request.run_id}", "admitted", ex=86400
+                    f"hfa:run:state:{request.run_id}",
+                    "admitted",
+                    ex=86400,
                 )
 
                 logger.info(
@@ -192,6 +308,13 @@ class AdmissionController:
                 raise
             except Exception as exc:
                 _set_attr(sp, "hfa.admitted", "false")
+
+                if incremented_tenant_inflight and self._tenant_registry:
+                    await self._tenant_registry.decrement_inflight(request.tenant_id)
+
+                if incremented_system_runs and self._quota:
+                    await self._quota.decrement_runs(request.tenant_id)
+
                 logger.error(
                     "AdmissionController.admit unexpected error: run=%s %s",
                     request.run_id,

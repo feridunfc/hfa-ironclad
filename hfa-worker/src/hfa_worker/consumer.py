@@ -31,7 +31,7 @@ from hfa_worker.executor import BaseExecutor
 from hfa_worker.idempotency import IdempotencyGuard
 from hfa_worker.models import InfrastructureError, TerminalExecutionError
 from hfa_worker.redis_utils import ack_message, ensure_consumer_group
-
+from hfa.runtime.tenant_utils import decrement_tenant_inflight_if_needed
 try:
     from hfa.obs.runtime_metrics import IRONCLADMetrics as _M
 except Exception:
@@ -300,7 +300,9 @@ class WorkerConsumer:
                         result.tokens_used,
                     )
                     await self._state.transition_state(event.run_id, "done")
-
+                    await decrement_tenant_inflight_if_needed(
+                        self._redis, event.run_id
+                    )
                     evt = RunCompletedEvent(
                         run_id=event.run_id,
                         tenant_id=event.tenant_id,
@@ -323,7 +325,9 @@ class WorkerConsumer:
                         error=result.error,
                     )
                     await self._state.transition_state(event.run_id, "failed")
-
+                    await decrement_tenant_inflight_if_needed(
+                        self._redis, event.run_id
+                    )
                     evt = RunFailedEvent(
                         run_id=event.run_id,
                         tenant_id=event.tenant_id,
@@ -354,7 +358,9 @@ class WorkerConsumer:
                     error=str(exc),
                 )
                 await self._state.transition_state(event.run_id, "failed")
-
+                await decrement_tenant_inflight_if_needed(
+                    self._redis, event.run_id
+                )
                 evt = RunFailedEvent(
                     run_id=event.run_id,
                     tenant_id=event.tenant_id,
@@ -380,6 +386,8 @@ class WorkerConsumer:
                     _M.runs_infra_failed_total.inc()
                 # no ACK, no terminal state — retry path
 
+
+
             except Exception as exc:
                 logger.error(
                     "Unexpected infra crash run=%s error=%s",
@@ -388,9 +396,15 @@ class WorkerConsumer:
                     exc_info=True,
                 )
                 await self._state.release_claim(event.run_id)
+
                 if _M:
                     _M.runs_infra_failed_total.inc()
-                # no ACK, no terminal state — retry path
+
+                # ❗ IMPORTANT:
+                # Do NOT decrement tenant inflight here.
+                # This is an infrastructure failure (retry path),
+                # not a terminal state.
+
 
             finally:
                 self._inflight.discard(event.run_id)
