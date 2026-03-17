@@ -120,13 +120,15 @@ class WorkerRegistry:
         Return only workers eligible to receive new runs.
 
         A worker is schedulable when ALL of the following hold:
-          - healthy
+          - status is HEALTHY (not dead, not degraded)
           - not draining
           - capacity > 0
           - inflight < capacity
 
-        This method is stricter than list_healthy_workers() and is safe for both
-        object-style and dict-style worker records.
+        This is stricter than list_healthy_workers() and is the authoritative
+        scheduling filter used to exclude draining or saturated workers.
+        Safe for both object-style and dict-style worker records through
+        _worker_is_schedulable().
         """
         all_workers = await self.list_healthy_workers(region=region)
         return [w for w in all_workers if self._worker_is_schedulable(w)]
