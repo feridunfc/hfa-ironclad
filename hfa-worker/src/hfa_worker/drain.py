@@ -22,6 +22,7 @@ import time
 
 from hfa.events.codec import serialize_event
 from hfa.events.schema import WorkerDrainingEvent
+from hfa.config.keys import RedisKey
 
 try:
     from hfa.obs.runtime_metrics import IRONCLADMetrics as _M
@@ -29,7 +30,6 @@ except Exception:
     _M = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
-SHARD_OWNER_KEY = "hfa:cp:shard:owner:{}"
 
 
 class DrainManager:
@@ -40,14 +40,15 @@ class DrainManager:
         worker_group: str,
         shards: list[int],
         consumer,
-        control_stream: str = "hfa:stream:control",
+        control_stream: str = "",
     ):
         self._redis = redis
         self._worker_id = worker_id
         self._worker_group = worker_group
         self._shards = shards
         self._consumer = consumer
-        self._control_stream = control_stream
+        # Default to canonical key; callers may override for testing
+        self._control_stream = control_stream or RedisKey.stream_control()
         self._draining = False
 
     @property
@@ -109,7 +110,7 @@ class DrainManager:
 
     async def _release_shards(self) -> None:
         for shard in self._shards:
-            key = SHARD_OWNER_KEY.format(shard)
+            key = RedisKey.cp_shard_owner(shard)
             try:
                 owner = await self._redis.get(key)
                 if owner:

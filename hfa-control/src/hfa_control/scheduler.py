@@ -1,6 +1,6 @@
 """
 hfa-control/src/hfa_control/scheduler.py
-IRONCLAD Sprint 10 — Scheduler
+IRONCLAD Sprint 10/14C — Scheduler
 
 Consumes RunAdmittedEvent from hfa:stream:control via XREADGROUP.
 Selects a worker_group using one of four placement policies.
@@ -25,6 +25,11 @@ IRONCLAD rules
 * No asyncio.get_event_loop() — get_running_loop().
 * close() always safe.
 * cost_cents: int — never float USD.
+
+Sprint 14C note
+----------------
+TenantFairnessTracker is initialized as a safe, in-memory helper only.
+It does NOT change existing scheduling behavior yet.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ import logging
 import time
 from typing import List, Optional
 
+from hfa.config.keys import RedisKey, RedisTTL
 from hfa.events.codec import serialize_event
 from hfa.events.schema import RunAdmittedEvent, RunRequestedEvent, RunScheduledEvent
 from hfa_control.exceptions import PlacementError
@@ -41,6 +47,7 @@ from hfa_control.fairness import FairnessSelector
 from hfa_control.models import ControlPlaneConfig, WorkerProfile
 from hfa_control.registry import WorkerRegistry
 from hfa_control.shard import ShardOwnershipManager
+from hfa_control.tenant_fairness import TenantFairnessTracker
 
 try:
     from hfa.obs.runtime_metrics import IRONCLADMetrics as _M
@@ -74,8 +81,11 @@ class Scheduler:
         self._task: Optional[asyncio.Task] = None
         self._rr_counter = 0  # round-robin state
 
-        # Sprint 14A: fairness-ready, but not actively used yet
+        # Sprint 14A: fairness-ready selector already present in repo
         self._fairness = FairnessSelector()
+
+        # Sprint 14C: safe helper only, not active in placement yet
+        self._tenant_fairness = TenantFairnessTracker()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -96,6 +106,7 @@ class Scheduler:
                 await self._task
             except asyncio.CancelledError:
                 pass
+            self._task = None
         logger.info("Scheduler closed")
 
     # ------------------------------------------------------------------
@@ -108,6 +119,7 @@ class Scheduler:
                 self._config.control_stream, _GROUP, id="0", mkstream=True
             )
         except Exception:
+            # BUSYGROUP and equivalent "already exists" paths are safe to ignore
             pass
 
     async def _consume_admitted(self) -> None:
@@ -123,15 +135,18 @@ class Scheduler:
                     count=20,
                     block=2000,
                 )
+
                 for _stream, entries in msgs or []:
                     for msg_id, data in entries:
-                        et = (data.get(b"event_type") or b"").decode()
-                        if et == "RunAdmitted":
+                        event_type = data.get(b"event_type") or data.get("event_type")
+                        if isinstance(event_type, bytes):
+                            event_type = event_type.decode()
+
+                        if event_type == "RunAdmitted":
                             evt = RunAdmittedEvent.from_redis(data)
                             await self._schedule(evt)
-                        await self._redis.xack(
-                            self._config.control_stream, _GROUP, msg_id
-                        )
+
+                        await self._redis.xack(self._config.control_stream, _GROUP, msg_id)
 
             except asyncio.CancelledError:
                 break
@@ -151,10 +166,14 @@ class Scheduler:
             )
             if result and result[1]:
                 for msg_id, data in result[1]:
-                    et = (data.get(b"event_type") or b"").decode()
-                    if et == "RunAdmitted":
+                    event_type = data.get(b"event_type") or data.get("event_type")
+                    if isinstance(event_type, bytes):
+                        event_type = event_type.decode()
+
+                    if event_type == "RunAdmitted":
                         evt = RunAdmittedEvent.from_redis(data)
                         await self._schedule(evt)
+
                     await self._redis.xack(self._config.control_stream, _GROUP, msg_id)
         except Exception as exc:
             logger.debug("Scheduler._autoclaim skipped: %s", exc)
@@ -177,10 +196,10 @@ class Scheduler:
                 policy = event.preferred_placement or "LEAST_LOADED"
                 worker_group = await self._select_worker_group(event, policy)
                 shard = await self._shards.shard_for_group(worker_group, event.run_id)
-                stream = f"hfa:stream:runs:{shard}"
+                stream = RedisKey.stream_shard(shard)
 
                 await self._redis.hset(
-                    f"hfa:run:meta:{event.run_id}",
+                    RedisKey.run_meta(event.run_id),
                     mapping={
                         "run_id": event.run_id,
                         "tenant_id": event.tenant_id,
@@ -191,9 +210,13 @@ class Scheduler:
                         "admitted_at": str(event.admitted_at),
                     },
                 )
-                await self._redis.expire(f"hfa:run:meta:{event.run_id}", 86400)
+                await self._redis.expire(
+                    RedisKey.run_meta(event.run_id), RedisTTL.RUN_META
+                )
                 await self._redis.set(
-                    f"hfa:run:state:{event.run_id}", "scheduled", ex=86400
+                    RedisKey.run_state(event.run_id),
+                    "scheduled",
+                    ex=RedisTTL.RUN_STATE,
                 )
 
                 await self._redis.zadd(
@@ -236,6 +259,18 @@ class Scheduler:
                 _set_attr(sp, "hfa.worker_group", worker_group)
                 _set_attr(sp, "hfa.shard", str(shard))
                 _set_attr(sp, "hfa.policy", policy)
+
+                # Sprint 14C: fairness accounting hook
+                # Only updates AFTER all Redis writes succeed.
+                # Never updates on PlacementError or unexpected exception.
+                try:
+                    self._tenant_fairness.update_on_dispatch(
+                        event.tenant_id,
+                        cost=self._fairness_cost(event),
+                    )
+                except Exception:
+                    pass  # fairness is instrumentation — never block scheduling
+
                 logger.info(
                     "Scheduled: run=%s group=%s shard=%d policy=%s",
                     event.run_id,
@@ -249,7 +284,9 @@ class Scheduler:
                 if _M:
                     _M.scheduling_failures_total.inc()
                 await self._redis.set(
-                    f"hfa:run:state:{event.run_id}", "failed", ex=86400
+                    RedisKey.run_state(event.run_id),
+                    "failed",
+                    ex=RedisTTL.RUN_STATE,
                 )
             except Exception as exc:
                 logger.error(
@@ -260,10 +297,35 @@ class Scheduler:
                 )
 
     # ------------------------------------------------------------------
+    # Fairness helpers
+    # ------------------------------------------------------------------
+
+    def _fairness_cost(self, event: RunAdmittedEvent) -> float:
+        """
+        Compute fairness accounting cost for a dispatched run.
+
+        Rules
+        -----
+        * If estimated_cost_cents is missing or <= 0: default to 1.0.
+        * Otherwise: cost_cents / 100, clamped to [1.0, 100.0].
+        * Ensures vruntime increments are bounded and comparable across tenants.
+        """
+        cost_cents = getattr(event, "estimated_cost_cents", 0) or 0
+        if cost_cents <= 0:
+            return 1.0
+        return max(1.0, min(float(cost_cents) / 100.0, 100.0))
+
+    # ------------------------------------------------------------------
     # Policy implementations
     # ------------------------------------------------------------------
 
     async def _select_worker_group(self, event: RunAdmittedEvent, policy: str) -> str:
+        # Sprint 14C: fairness observation (no behavior change)
+        try:
+            self._tenant_fairness.observe(event.tenant_id)
+        except Exception:
+            pass
+
         if _M:
             _M.scheduling_attempts_total.inc()
 
@@ -322,12 +384,14 @@ class Scheduler:
         available = [w for w in workers if w.available_slots > 0]
         if not available:
             raise PlacementError("No workers with available slots (round-robin)")
+
         seen: list[str] = []
         groups: list[WorkerProfile] = []
         for w in available:
             if w.worker_group not in seen:
                 seen.append(w.worker_group)
                 groups.append(w)
+
         target = groups[self._rr_counter % len(groups)]
         self._rr_counter += 1
         return target.worker_group

@@ -26,6 +26,7 @@ from typing import Optional, Set
 
 from hfa.events.codec import deserialize_run_requested, serialize_event
 from hfa.events.schema import RunCompletedEvent, RunFailedEvent
+from hfa.config.keys import RedisKey
 from hfa.runtime.state_store import StateStore
 from hfa_worker.executor import BaseExecutor
 from hfa_worker.idempotency import IdempotencyGuard
@@ -63,7 +64,7 @@ class WorkerConsumer:
         self._inflight: Set[str] = set()
 
         self._consumer_name = worker_id
-        self._streams = [f"hfa:stream:runs:{s}" for s in shards]
+        self._streams = [RedisKey.stream_shard(s) for s in shards]
 
         self._running = False
         self._pulling = True
@@ -341,7 +342,7 @@ class WorkerConsumer:
                         _M.runs_failed_total.inc()
                         _M.run_execution_duration_ms.record(duration_ms)
 
-                await self._redis.xadd("hfa:stream:results", serialize_event(evt))
+                await self._redis.xadd(RedisKey.stream_results(), serialize_event(evt))
                 await self._state.mark_completed(event.run_id)
                 await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
 
@@ -369,7 +370,7 @@ class WorkerConsumer:
                     cost_cents=exc.cost_cents,
                     tokens_used=exc.tokens_used,
                 )
-                await self._redis.xadd("hfa:stream:results", serialize_event(evt))
+                await self._redis.xadd(RedisKey.stream_results(), serialize_event(evt))
                 await self._state.mark_completed(event.run_id)
                 await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
 

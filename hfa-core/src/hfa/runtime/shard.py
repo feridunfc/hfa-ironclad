@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Iterable, List
 
+from hfa.config.keys import RedisKey
+
 logger = logging.getLogger("hfa.runtime.shard")
 
 
@@ -13,7 +15,7 @@ class ShardClaimer:
 
     Sprint 9 contract:
     - ownership is per worker instance, not per group
-    - key: `hfa:shard:owner:{shard}`
+    - key: `hfa:cp:shard:owner:{shard}`
     - value: canonical `worker_id`
     """
 
@@ -24,7 +26,7 @@ class ShardClaimer:
         self._worker_id = worker_id
 
     async def claim(self, shard: int) -> bool:
-        key = f"hfa:shard:owner:{shard}"
+        key = RedisKey.cp_shard_owner(shard)
         claimed = await self._redis.set(
             key,
             self._worker_id,
@@ -37,7 +39,7 @@ class ShardClaimer:
 
     async def renew(self, shards: Iterable[int]) -> None:
         for shard in shards:
-            key = f"hfa:shard:owner:{shard}"
+            key = RedisKey.cp_shard_owner(shard)
             current = await self._redis.get(key)
             current_text = current.decode() if isinstance(current, bytes) else current
             if current_text == self._worker_id:
@@ -45,7 +47,7 @@ class ShardClaimer:
 
     async def release(self, shards: Iterable[int]) -> None:
         for shard in shards:
-            key = f"hfa:shard:owner:{shard}"
+            key = RedisKey.cp_shard_owner(shard)
             current = await self._redis.get(key)
             current_text = current.decode() if isinstance(current, bytes) else current
             if current_text == self._worker_id:
@@ -55,7 +57,7 @@ class ShardClaimer:
     async def currently_owned(self, shards: Iterable[int]) -> List[int]:
         owned: List[int] = []
         for shard in shards:
-            key = f"hfa:shard:owner:{shard}"
+            key = RedisKey.cp_shard_owner(shard)
             current = await self._redis.get(key)
             current_text = current.decode() if isinstance(current, bytes) else current
             if current_text == self._worker_id:

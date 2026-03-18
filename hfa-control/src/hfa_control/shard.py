@@ -25,11 +25,12 @@ import hashlib
 import logging
 from typing import Dict, List, Optional
 
+from hfa.config.keys import RedisKey
 from hfa_control.exceptions import ShardOwnershipError
 
 logger = logging.getLogger(__name__)
 
-OWNER_TTL = 60  # seconds; worker must publish heartbeat to renew
+OWNER_TTL = 60       # seconds; worker must publish heartbeat to renew
 MONITOR_INTERVAL = 15  # seconds
 
 
@@ -78,7 +79,7 @@ class ShardOwnershipManager:
     async def shards_for_group(self, worker_group: str) -> List[int]:
         """Return sorted list of shard IDs owned by worker_group."""
         try:
-            owners = await self._redis.hgetall("hfa:cp:shard:owners")
+            owners = await self._redis.hgetall(RedisKey.cp_shard_owners())
             return sorted(
                 int(shard.decode() if isinstance(shard, bytes) else shard)
                 for shard, group in owners.items()
@@ -92,7 +93,7 @@ class ShardOwnershipManager:
     async def all_owners(self) -> Dict[int, str]:
         """Return {shard: worker_group} map."""
         try:
-            raw = await self._redis.hgetall("hfa:cp:shard:owners")
+            raw = await self._redis.hgetall(RedisKey.cp_shard_owners())
             return {
                 int(k.decode() if isinstance(k, bytes) else k): (
                     v.decode() if isinstance(v, bytes) else v
@@ -112,20 +113,19 @@ class ShardOwnershipManager:
         Atomically claim shard for worker_group (SET NX EX).
         Returns True if claim succeeded, False if already owned by another group.
         """
-        key = f"hfa:cp:shard:owner:{shard}"
+        key = RedisKey.cp_shard_owner(shard)
         ok = await self._redis.set(key, worker_group, nx=True, ex=OWNER_TTL)
         if ok:
-            await self._redis.hset("hfa:cp:shard:owners", shard, worker_group)
+            await self._redis.hset(RedisKey.cp_shard_owners(), shard, worker_group)
             logger.info("Shard claimed: shard=%d group=%s", shard, worker_group)
         return bool(ok)
 
     async def renew_shard(self, shard: int, worker_group: str) -> bool:
         """
         Extend TTL for an owned shard.
-        Returns False if the shard is no longer owned by this group
-        (e.g., was reclaimed by another worker during outage).
+        Returns False if the shard is no longer owned by this group.
         """
-        key = f"hfa:cp:shard:owner:{shard}"
+        key = RedisKey.cp_shard_owner(shard)
         current = await self._redis.get(key)
         if (
             current
@@ -158,18 +158,18 @@ class ShardOwnershipManager:
 
     async def _check_orphans(self) -> None:
         """
-        Scan hfa:cp:shard:owners. For each shard, verify the
-        hfa:cp:shard:owner:{shard} key still exists (TTL alive).
+        Scan shard owners map. For each shard, verify the
+        owner key still exists (TTL alive).
         If not → orphaned shard: remove from owners map and log.
         """
         try:
-            owners = await self._redis.hgetall("hfa:cp:shard:owners")
+            owners = await self._redis.hgetall(RedisKey.cp_shard_owners())
             for shard_b, group_b in owners.items():
                 shard = int(shard_b.decode() if isinstance(shard_b, bytes) else shard_b)
                 group = group_b.decode() if isinstance(group_b, bytes) else group_b
-                alive = await self._redis.exists(f"hfa:cp:shard:owner:{shard}")
+                alive = await self._redis.exists(RedisKey.cp_shard_owner(shard))
                 if not alive:
-                    await self._redis.hdel("hfa:cp:shard:owners", shard)
+                    await self._redis.hdel(RedisKey.cp_shard_owners(), shard)
                     logger.warning(
                         "Shard orphaned: shard=%d (was %s) — removed from map",
                         shard,

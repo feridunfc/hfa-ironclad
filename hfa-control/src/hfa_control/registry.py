@@ -34,6 +34,7 @@ import logging
 import time
 from typing import List, Optional
 
+from hfa.config.keys import RedisKey
 from hfa.events.schema import WorkerDrainingEvent, WorkerHeartbeatEvent
 
 try:
@@ -92,16 +93,16 @@ class WorkerRegistry:
         If region is None, returns workers across all regions.
         """
         if region:
-            raw_ids = await self._redis.smembers(f"hfa:cp:workers:by_region:{region}")
+            raw_ids = await self._redis.smembers(RedisKey.cp_workers_by_region(region))
         else:
-            keys = await self._redis.keys("hfa:cp:worker:*")
+            keys = await self._redis.keys(RedisKey.cp_workers_scan_pattern())
             raw_ids = {k.decode().split(":", 3)[3].encode() for k in keys}
 
         now = time.time()
         profiles = []
         for wid_b in raw_ids:
             wid = wid_b.decode() if isinstance(wid_b, bytes) else wid_b
-            raw = await self._redis.hgetall(f"hfa:cp:worker:{wid}")
+            raw = await self._redis.hgetall(RedisKey.cp_worker(wid))
             if not raw:
                 continue
             profile = WorkerProfile.from_redis_hash(raw)
@@ -134,7 +135,7 @@ class WorkerRegistry:
         return [w for w in all_workers if self._worker_is_schedulable(w)]
 
     async def get_worker(self, worker_id: str) -> WorkerProfile:
-        raw = await self._redis.hgetall(f"hfa:cp:worker:{worker_id}")
+        raw = await self._redis.hgetall(RedisKey.cp_worker(worker_id))
         if not raw:
             raise WorkerNotFoundError(f"Worker {worker_id!r} not registered")
         return WorkerProfile.from_redis_hash(raw)
@@ -142,7 +143,7 @@ class WorkerRegistry:
     async def mark_dead(self, worker_id: str) -> None:
         try:
             await self._redis.hset(
-                f"hfa:cp:worker:{worker_id}", "status", WorkerStatus.DEAD.value
+                RedisKey.cp_worker(worker_id), "status", WorkerStatus.DEAD.value
             )
             logger.warning("WorkerRegistry.mark_dead: %s", worker_id)
         except Exception as exc:
@@ -151,7 +152,7 @@ class WorkerRegistry:
     async def registry_size(self) -> int:
         """Return total number of registered workers."""
         try:
-            keys = await self._redis.keys("hfa:cp:worker:*")
+            keys = await self._redis.keys(RedisKey.cp_workers_scan_pattern())
             return len(keys)
         except Exception:
             return 0
@@ -223,7 +224,7 @@ class WorkerRegistry:
             await self._on_draining(evt)
 
     async def _on_heartbeat(self, event: WorkerHeartbeatEvent) -> None:
-        key = f"hfa:cp:worker:{event.worker_id}"
+        key = RedisKey.cp_worker(event.worker_id)
         mapping = {
             "worker_id": event.worker_id,
             "worker_group": event.worker_group,
@@ -248,7 +249,7 @@ class WorkerRegistry:
         await self._redis.hset(key, mapping=mapping)
         await self._redis.expire(key, self._config.registry_ttl)
         await self._redis.sadd(
-            f"hfa:cp:workers:by_region:{event.region}", event.worker_id
+            RedisKey.cp_workers_by_region(event.region), event.worker_id
         )
         logger.debug(
             "Heartbeat: worker=%s inflight=%d/%d region=%s status=%s",
@@ -260,7 +261,7 @@ class WorkerRegistry:
         )
 
     async def _on_draining(self, event: WorkerDrainingEvent) -> None:
-        key = f"hfa:cp:worker:{event.worker_id}"
+        key = RedisKey.cp_worker(event.worker_id)
         await self._redis.hset(key, "status", WorkerStatus.DRAINING.value)
         await self._redis.expire(key, self._config.registry_ttl)
         logger.info(

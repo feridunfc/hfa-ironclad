@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+
 from redis.exceptions import ResponseError
+
+from hfa.config.keys import RedisKey, RedisTTL
 
 logger = logging.getLogger(__name__)
 
@@ -12,25 +15,28 @@ if not current then
 end
 local new = math.max(0, tonumber(current) - 1)
 redis.call('set', KEYS[1], new)
-redis.call('expire', KEYS[1], 86400)
+redis.call('expire', KEYS[1], ARGV[1])
 return new
 """
 
 
 async def _decrement_with_fallback(redis, inflight_key: str) -> int:
     try:
-        # ✅ Real Redis path (atomic)
-        return int(await redis.eval(DECREMENT_SCRIPT, 1, inflight_key) or 0)
+        # Real Redis path (atomic)
+        return int(
+            await redis.eval(DECREMENT_SCRIPT, 1, inflight_key, RedisTTL.TENANT_INFLIGHT)
+            or 0
+        )
 
     except ResponseError as exc:
-        # ✅ fakeredis fallback
+        # fakeredis fallback
         if "unknown command 'eval'" not in str(exc).lower():
             raise
 
         raw = await redis.get(inflight_key)
 
         if raw is None:
-            await redis.set(inflight_key, 0, ex=86400)
+            await redis.set(inflight_key, 0, ex=RedisTTL.TENANT_INFLIGHT)
             return 0
 
         if isinstance(raw, bytes):
@@ -42,14 +48,13 @@ async def _decrement_with_fallback(redis, inflight_key: str) -> int:
             current = 0
 
         new_value = max(0, current - 1)
-
-        await redis.set(inflight_key, new_value, ex=86400)
+        await redis.set(inflight_key, new_value, ex=RedisTTL.TENANT_INFLIGHT)
         return new_value
 
 
 async def decrement_tenant_inflight_if_needed(redis, run_id: str) -> None:
     try:
-        meta_key = f"hfa:run:meta:{run_id}"
+        meta_key = RedisKey.run_meta(run_id)
 
         tenant_id_raw = await redis.hget(meta_key, "tenant_id")
         if tenant_id_raw is None:
@@ -64,9 +69,7 @@ async def decrement_tenant_inflight_if_needed(redis, run_id: str) -> None:
             else str(tenant_id_raw)
         )
 
-        inflight_key = f"hfa:tenant:{tenant_id}:inflight"
-
-        # ✅ CRITICAL: fallback wrapper kullanılıyor
+        inflight_key = RedisKey.tenant_inflight(tenant_id)
         new_value = await _decrement_with_fallback(redis, inflight_key)
 
         logger.debug(

@@ -35,12 +35,13 @@ import logging
 from typing import Optional
 
 from hfa.obs.tracing import get_tracer  # type: ignore[attr-defined]
+from hfa.config.keys import RedisKey
 from hfa_control.exceptions import LeadershipError
 
 logger = logging.getLogger(__name__)
 _tracer = get_tracer("hfa.leader")
 
-FENCE_KEY = "hfa:cp:fence"
+FENCE_KEY = RedisKey.cp_fence()
 
 
 class LeaderElection:
