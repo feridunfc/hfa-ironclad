@@ -93,6 +93,18 @@ class AdmissionController:
         self._tenant_registry = tenant_registry
         self._rate_limiter = rate_limiter
 
+    async def initialise(self) -> None:
+        """
+        Pre-warm the rate limiter by loading the Lua script into Redis.
+
+        Should be called once at Control Plane startup (in ControlPlaneService.start()).
+        Safe to skip — check_and_consume() auto-initialises on first call —
+        but calling here avoids a cold-start latency spike on the first admission.
+        """
+        if self._rate_limiter is not None:
+            await self._rate_limiter.initialise()
+            logger.info("AdmissionController: rate limiter initialised (EVALSHA ready)")
+
     async def _tenant_inflight_allowed(
         self, tenant_id: str
     ) -> tuple[bool, Optional[str]]:
