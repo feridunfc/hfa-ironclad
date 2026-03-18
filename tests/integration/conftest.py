@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import pytest
 import pytest_asyncio
-import redis.asyncio as aioredis
+from redis.asyncio import Redis
 
 
 # ---------------------------------------------------------------------------
@@ -78,15 +78,21 @@ def redis_container():
 # ---------------------------------------------------------------------------
 
 
+
 @pytest_asyncio.fixture
 async def real_redis(redis_container):
     """
     Async Redis client connected to the test container.
     Database is flushed after each test to ensure isolation.
     """
-    url = redis_container.get_connection_url()
-    client = aioredis.from_url(url, decode_responses=False)
+    client = Redis(
+        host=redis_container.get_container_host_ip(),
+        port=int(redis_container.get_exposed_port(6379)),
+        decode_responses=True,
+    )
+
     try:
+        await client.flushdb()
         yield client
     finally:
         await client.flushdb()
