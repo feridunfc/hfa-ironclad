@@ -39,9 +39,9 @@ import logging
 import time
 from typing import List, Optional
 
+from hfa.config.keys import RedisKey, RedisTTL
 from hfa.events.codec import serialize_event
 from hfa.events.schema import RunAdmittedEvent, RunRequestedEvent, RunScheduledEvent
-from hfa.config.keys import RedisKey, RedisTTL
 from hfa_control.exceptions import PlacementError
 from hfa_control.fairness import FairnessSelector
 from hfa_control.models import ControlPlaneConfig, WorkerProfile
@@ -210,9 +210,13 @@ class Scheduler:
                         "admitted_at": str(event.admitted_at),
                     },
                 )
-                await self._redis.expire(RedisKey.run_meta(event.run_id), RedisTTL.RUN_META)
+                await self._redis.expire(
+                    RedisKey.run_meta(event.run_id), RedisTTL.RUN_META
+                )
                 await self._redis.set(
-                    RedisKey.run_state(event.run_id), "scheduled", ex=RedisTTL.RUN_STATE
+                    RedisKey.run_state(event.run_id),
+                    "scheduled",
+                    ex=RedisTTL.RUN_STATE,
                 )
 
                 await self._redis.zadd(
@@ -280,7 +284,9 @@ class Scheduler:
                 if _M:
                     _M.scheduling_failures_total.inc()
                 await self._redis.set(
-                    RedisKey.run_state(event.run_id), "failed", ex=RedisTTL.RUN_STATE
+                    RedisKey.run_state(event.run_id),
+                    "failed",
+                    ex=RedisTTL.RUN_STATE,
                 )
             except Exception as exc:
                 logger.error(
@@ -319,6 +325,7 @@ class Scheduler:
             self._tenant_fairness.observe(event.tenant_id)
         except Exception:
             pass
+
         if _M:
             _M.scheduling_attempts_total.inc()
 
