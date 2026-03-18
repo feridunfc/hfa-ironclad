@@ -5,7 +5,6 @@ from typing import Optional
 
 from hfa.config.keys import RedisKey, RedisTTL
 
-
 # Legacy module-level constants kept for any external importers.
 # New code should use RedisKey.tenant_config() / RedisKey.tenant_inflight().
 TENANT_CONFIG_KEY = "hfa:tenant:{tenant_id}:config"

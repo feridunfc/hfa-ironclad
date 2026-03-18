@@ -46,7 +46,8 @@ Backward compatibility
 from __future__ import annotations
 
 import logging
-import time,uuid
+import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -56,12 +57,22 @@ from hfa.lua.loader import LuaScriptLoader
 logger = logging.getLogger(__name__)
 
 # Absolute path to the Lua script, relative to this package's installed location
-_LUA_SCRIPT_PATH = Path(__file__).parent.parent.parent.parent.parent / \
-    "hfa-core" / "src" / "hfa" / "lua" / "rate_limit.lua"
+_LUA_SCRIPT_PATH = (
+    Path(__file__).parent.parent.parent.parent.parent
+    / "hfa-core"
+    / "src"
+    / "hfa"
+    / "lua"
+    / "rate_limit.lua"
+)
 
 # Fallback: resolve relative to hfa package inside site-packages
-_LUA_SCRIPT_PATH_INSTALLED = Path(__file__).parent.parent.parent.parent / \
-    "hfa" / "lua" / "rate_limit.lua"
+_LUA_SCRIPT_PATH_INSTALLED = (
+    Path(__file__).parent.parent.parent.parent
+    / "hfa"
+    / "lua"
+    / "rate_limit.lua"
+)
 
 
 def _resolve_lua_path() -> Path:
@@ -70,15 +81,17 @@ def _resolve_lua_path() -> Path:
         return _LUA_SCRIPT_PATH
     if _LUA_SCRIPT_PATH_INSTALLED.exists():
         return _LUA_SCRIPT_PATH_INSTALLED
-    # Final fallback: search from this file upward
+
     here = Path(__file__).resolve()
     for parent in here.parents:
         candidate = parent / "hfa-core" / "src" / "hfa" / "lua" / "rate_limit.lua"
         if candidate.exists():
             return candidate
+
         candidate2 = parent / "hfa" / "lua" / "rate_limit.lua"
         if candidate2.exists():
             return candidate2
+
     raise FileNotFoundError(
         "rate_limit.lua not found. Expected at hfa-core/src/hfa/lua/rate_limit.lua"
     )
@@ -98,10 +111,6 @@ class TenantRateLimiter:
         self._redis = redis
         self._loader: Optional[LuaScriptLoader] = None
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-
     async def initialise(self) -> None:
         """
         Load the Lua script into Redis via SCRIPT LOAD and cache the SHA.
@@ -117,10 +126,6 @@ class TenantRateLimiter:
             "TenantRateLimiter initialised: SHA=%s",
             (self._loader.sha[:8] + "…") if self._loader.sha else "fallback-mode",
         )
-
-    # ------------------------------------------------------------------
-    # Public API (backward-compatible)
-    # ------------------------------------------------------------------
 
     def _key(self, tenant_id: str) -> str:
         return RedisKey.tenant_rate(tenant_id)
@@ -144,7 +149,6 @@ class TenantRateLimiter:
         if max_runs_per_second is None or max_runs_per_second <= 0:
             return True
 
-        # Auto-initialise if caller skipped it (e.g. in unit tests)
         if self._loader is None:
             await self.initialise()
 
@@ -158,7 +162,9 @@ class TenantRateLimiter:
                 keys=[key],
                 args=[int(max_runs_per_second), current, member, RedisTTL.TENANT_RATE],
                 fallback=lambda: self._check_and_consume_non_atomic(
-                    tenant_id, max_runs_per_second, current=current
+                    tenant_id,
+                    max_runs_per_second,
+                    current=current,
                 ),
             )
             admitted = bool(result)
@@ -217,10 +223,6 @@ class TenantRateLimiter:
         member = f"{current:.6f}:{id(self)}:{tenant_id}"
         await self._redis.zadd(key, {member: current})
         await self._redis.expire(key, RedisTTL.TENANT_RATE)
-
-    # ------------------------------------------------------------------
-    # Non-atomic fallback (fakeredis / unit tests only)
-    # ------------------------------------------------------------------
 
     async def _check_and_consume_non_atomic(
         self,

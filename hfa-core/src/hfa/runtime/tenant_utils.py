@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+
 from redis.exceptions import ResponseError
 
 from hfa.config.keys import RedisKey, RedisTTL

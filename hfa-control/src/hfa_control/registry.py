@@ -34,8 +34,8 @@ import logging
 import time
 from typing import List, Optional
 
-from hfa.events.schema import WorkerDrainingEvent, WorkerHeartbeatEvent
 from hfa.config.keys import RedisKey
+from hfa.events.schema import WorkerDrainingEvent, WorkerHeartbeatEvent
 
 try:
     from hfa.obs.tracing import get_tracer  # type: ignore[attr-defined]
