@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import List
 
+from hfa.config.keys import RedisKey
+
 
 class WorkerStatus(str, Enum):
     HEALTHY = "healthy"
@@ -112,14 +114,14 @@ class ControlPlaneConfig:
     recovery_sweep_interval: float = 30.0
     registry_ttl: int = 60  # Redis TTL for worker hash key
     max_reschedule_attempts: int = 3
-    dlq_stream: str = "hfa:stream:dlq"
-    heartbeat_stream: str = "hfa:stream:heartbeat"
-    results_stream: str = "hfa:stream:results"
-    control_stream: str = "hfa:stream:control"
-    leader_key: str = "hfa:cp:leader"
+    dlq_stream: str = field(default_factory=lambda: RedisKey.stream_dlq())
+    heartbeat_stream: str = field(default_factory=lambda: RedisKey.stream_heartbeat())
+    results_stream: str = field(default_factory=lambda: RedisKey.stream_results())
+    control_stream: str = field(default_factory=lambda: RedisKey.stream_control())
+    leader_key: str = field(default_factory=lambda: RedisKey.cp_leader())
     leader_ttl: int = 15
     leader_renew_interval: float = 5.0
-    running_zset: str = "hfa:cp:running"
+    running_zset: str = field(default_factory=lambda: RedisKey.cp_running())
     # XAUTOCLAIM settings
     autoclaim_idle_ms: int = 30_000  # reclaim after 30s idle in PEL
     autoclaim_count: int = 10

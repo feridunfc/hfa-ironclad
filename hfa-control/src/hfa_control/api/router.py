@@ -49,6 +49,7 @@ from typing import List
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from hfa.config.keys import RedisKey
 from hfa.events.schema import WorkerDrainingEvent
 from hfa.events.codec import serialize_event
 from hfa_control.exceptions import (
@@ -249,10 +250,10 @@ async def list_shards(
     result = []
     for shard, group in sorted(owners.items()):
         try:
-            stream_len = await redis.xlen(f"hfa:stream:runs:{shard}")
+            stream_len = await redis.xlen(RedisKey.stream_shard(shard))
         except Exception:
             stream_len = -1
-        alive = bool(await redis.exists(f"hfa:cp:shard:owner:{shard}"))
+        alive = bool(await redis.exists(RedisKey.cp_shard_owner(shard)))
         result.append(
             ShardResponse(
                 shard=shard,
@@ -368,7 +369,7 @@ async def get_placement(
 ) -> PlacementResponse:
     _tenant_header(x_tenant_id)
     redis = request.app.state.redis
-    meta = await redis.hgetall(f"hfa:run:meta:{run_id}")
+    meta = await redis.hgetall(RedisKey.run_meta(run_id))
     if not meta:
         raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
 
@@ -378,7 +379,7 @@ async def get_placement(
 
     if _s("tenant_id") != x_tenant_id:
         raise HTTPException(status_code=403, detail="Tenant mismatch")
-    state_raw = await redis.get(f"hfa:run:state:{run_id}")
+    state_raw = await redis.get(RedisKey.run_state(run_id))
     state = (
         state_raw.decode() if isinstance(state_raw, bytes) else state_raw
     ) or "unknown"
@@ -407,7 +408,7 @@ async def force_reschedule(
     except LeadershipError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     redis = request.app.state.redis
-    meta = await redis.hgetall(f"hfa:run:meta:{run_id}")
+    meta = await redis.hgetall(RedisKey.run_meta(run_id))
     if not meta:
         raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
 
@@ -539,7 +540,7 @@ async def delete_dlq(
     _tenant_header(x_tenant_id)
     _require_operator(x_cp_auth)
     redis = request.app.state.redis
-    meta = await redis.hgetall(f"hfa:cp:dlq:meta:{run_id}")
+    meta = await redis.hgetall(RedisKey.cp_dlq_meta(run_id))
     if not meta:
         raise HTTPException(status_code=404, detail=f"DLQ {run_id!r} not found")
 
@@ -549,7 +550,7 @@ async def delete_dlq(
 
     if _s("tenant_id") != x_tenant_id:
         raise HTTPException(status_code=403, detail="Tenant mismatch")
-    await redis.delete(f"hfa:cp:dlq:meta:{run_id}")
+    await redis.delete(RedisKey.cp_dlq_meta(run_id))
     logger.info("DLQ entry deleted: run=%s by tenant=%s", run_id, x_tenant_id)
     return {"run_id": run_id, "status": "deleted"}
 

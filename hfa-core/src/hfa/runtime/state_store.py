@@ -10,6 +10,8 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
+from hfa.config.keys import RedisKey, RedisTTL, TTL
+
 logger = logging.getLogger(__name__)
 
 
@@ -17,16 +19,20 @@ class StateStore:
     """
     Centralized state management for runs.
     Enforces consistent Redis contracts.
+
+    All key patterns and TTL values are sourced from hfa.config.keys.
     """
 
+    # Legacy class-level constants preserved for backward compatibility.
+    # New code should import RedisKey / TTL directly.
     STATE_KEY = "hfa:run:state:{}"
     META_KEY = "hfa:run:meta:{}"
     RESULT_KEY = "hfa:run:result:{}"
     RUNNING_ZSET = "hfa:cp:running"
     EXECUTION_TOKEN_KEY = "hfa:run:claim:{}"
 
-    TTL = 86400
-    CLAIM_TTL = 900  # 15 minutes
+    TTL = TTL.RUN_STATE
+    CLAIM_TTL = TTL.RUN_CLAIM
 
     def __init__(self, redis):
         self._redis = redis

@@ -45,6 +45,7 @@ from hfa.events.schema import (
     RunDeadLetteredEvent,
 )
 from hfa.events.codec import serialize_event
+from hfa.config.keys import RedisKey, RedisTTL
 from hfa_control.models import ControlPlaneConfig
 from hfa_control.exceptions import DLQEntryNotFoundError, TenantMismatchError
 from hfa.runtime.tenant_utils import decrement_tenant_inflight_if_needed
@@ -156,7 +157,7 @@ class RecoveryService:
         result: list[str] = []
         for run_id_b in stale_raw:
             run_id = run_id_b.decode() if isinstance(run_id_b, bytes) else run_id_b
-            state = await self._redis.get(f"hfa:run:state:{run_id}")
+            state = await self._redis.get(RedisKey.run_state(run_id))
             if state:
                 s = state.decode() if isinstance(state, bytes) else state
                 if s in ("running", "scheduled"):
@@ -171,7 +172,7 @@ class RecoveryService:
     # ------------------------------------------------------------------
 
     async def _handle_stale(self, run_id: str) -> str:
-        meta = await self._redis.hgetall(f"hfa:run:meta:{run_id}")
+        meta = await self._redis.hgetall(RedisKey.run_meta(run_id))
         if not meta:
             await self._redis.zrem(self._config.running_zset, run_id)
             return "skipped"
@@ -213,9 +214,9 @@ class RecoveryService:
 
         # Update metadata
         await self._redis.hset(
-            f"hfa:run:meta:{run_id}", "reschedule_count", str(new_count)
+            RedisKey.run_meta(run_id), "reschedule_count", str(new_count)
         )
-        await self._redis.set(f"hfa:run:state:{run_id}", "rescheduled", ex=86400)
+        await self._redis.set(RedisKey.run_state(run_id), "rescheduled", ex=RedisTTL.RUN_STATE)
 
         # Audit event
         resched_evt = RunRescheduledEvent(
@@ -266,12 +267,12 @@ class RecoveryService:
         reason: str,
     ) -> str:
         await self._redis.set(
-            f"hfa:run:state:{run_id}",
+            RedisKey.run_state(run_id),
             "dead_lettered",
-            ex=604_800,  # 7 days
+            ex=RedisTTL.DLQ_META,
         )
         await self._redis.hset(
-            f"hfa:cp:dlq:meta:{run_id}",
+            RedisKey.cp_dlq_meta(run_id),
             mapping={
                 "run_id": run_id,
                 "tenant_id": tenant_id,
@@ -280,7 +281,7 @@ class RecoveryService:
                 "dead_lettered_at": str(time.time()),
             },
         )
-        await self._redis.expire(f"hfa:cp:dlq:meta:{run_id}", 604_800)
+        await self._redis.expire(RedisKey.cp_dlq_meta(run_id), RedisTTL.DLQ_META)
         await self._redis.zrem(self._config.running_zset, run_id)
 
         dlq_evt = RunDeadLetteredEvent(
@@ -315,7 +316,7 @@ class RecoveryService:
         Raises DLQEntryNotFoundError if not found.
         Raises TenantMismatchError if tenant does not match.
         """
-        meta = await self._redis.hgetall(f"hfa:cp:dlq:meta:{run_id}")
+        meta = await self._redis.hgetall(RedisKey.cp_dlq_meta(run_id))
         if not meta:
             raise DLQEntryNotFoundError(f"DLQ entry not found: {run_id!r}")
 
@@ -331,7 +332,7 @@ class RecoveryService:
             )
 
         agent_type = _s("agent_type") or ""
-        raw_payload = await self._redis.get(f"hfa:run:payload:{run_id}")
+        raw_payload = await self._redis.get(RedisKey.run_payload(run_id))
         payload: dict = {}
         if raw_payload:
             try:
@@ -344,8 +345,8 @@ class RecoveryService:
                 pass
 
         # Reset state
-        await self._redis.hset(f"hfa:run:meta:{run_id}", "reschedule_count", "0")
-        await self._redis.set(f"hfa:run:state:{run_id}", "admitted", ex=86400)
+        await self._redis.hset(RedisKey.run_meta(run_id), "reschedule_count", "0")
+        await self._redis.set(RedisKey.run_state(run_id), "admitted", ex=RedisTTL.RUN_STATE)
         await self._redis.zadd(self._config.running_zset, {run_id: time.time()})
 
         # Re-emit to Scheduler
@@ -358,12 +359,12 @@ class RecoveryService:
         await self._redis.xadd(
             self._config.control_stream,
             serialize_event(evt),
-            maxlen=100_000,
+            maxlen=RedisTTL.STREAM_MAXLEN,
             approximate=True,
         )
 
         # Remove from DLQ
-        await self._redis.delete(f"hfa:cp:dlq:meta:{run_id}")
+        await self._redis.delete(RedisKey.cp_dlq_meta(run_id))
 
         logger.info("DLQ replay: run=%s tenant=%s", run_id, dlq_tenant)
 
@@ -381,12 +382,14 @@ class RecoveryService:
         Scans hfa:cp:dlq:meta:* keys (bounded by 7-day TTL).
         """
         _all = tenant_id == "__all__"
+        # Build the scan pattern from the canonical key prefix
+        dlq_scan_pattern = RedisKey.cp_dlq_meta("*")
         try:
             cursor = 0
             entries = []
             while True:
                 cursor, keys = await self._redis.scan(
-                    cursor, match="hfa:cp:dlq:meta:*", count=100
+                    cursor, match=dlq_scan_pattern, count=100
                 )
                 for key in keys:
                     meta = await self._redis.hgetall(key)

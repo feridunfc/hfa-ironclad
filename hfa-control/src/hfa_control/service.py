@@ -28,6 +28,7 @@ from hfa_control.shard import ShardOwnershipManager
 from hfa_control.admission import AdmissionController
 from hfa_control.scheduler import Scheduler
 from hfa_control.recovery import RecoveryService
+from hfa.config.keys import RedisKey
 
 logger = logging.getLogger(__name__)
 
@@ -307,7 +308,7 @@ class ControlPlaneService:
         stale_ids = await self._recovery._find_stale_runs()
         result = []
         for run_id in stale_ids:
-            meta = await self._redis.hgetall(f"hfa:run:meta:{run_id}")
+            meta = await self._redis.hgetall(RedisKey.run_meta(run_id))
 
             def _s(k: str) -> str:
                 v = meta.get(k.encode()) or meta.get(k)

@@ -41,6 +41,7 @@ from typing import List, Optional
 
 from hfa.events.codec import serialize_event
 from hfa.events.schema import RunAdmittedEvent, RunRequestedEvent, RunScheduledEvent
+from hfa.config.keys import RedisKey, RedisTTL
 from hfa_control.exceptions import PlacementError
 from hfa_control.fairness import FairnessSelector
 from hfa_control.models import ControlPlaneConfig, WorkerProfile
@@ -193,17 +194,12 @@ class Scheduler:
 
             try:
                 policy = event.preferred_placement or "LEAST_LOADED"
-                # Sprint 14C: fairness hint (non-breaking)
-                try:
-                    self._tenant_fairness.update_on_dispatch(event.tenant_id)
-                except Exception:
-                    pass
                 worker_group = await self._select_worker_group(event, policy)
                 shard = await self._shards.shard_for_group(worker_group, event.run_id)
-                stream = f"hfa:stream:runs:{shard}"
+                stream = RedisKey.stream_shard(shard)
 
                 await self._redis.hset(
-                    f"hfa:run:meta:{event.run_id}",
+                    RedisKey.run_meta(event.run_id),
                     mapping={
                         "run_id": event.run_id,
                         "tenant_id": event.tenant_id,
@@ -214,9 +210,9 @@ class Scheduler:
                         "admitted_at": str(event.admitted_at),
                     },
                 )
-                await self._redis.expire(f"hfa:run:meta:{event.run_id}", 86400)
+                await self._redis.expire(RedisKey.run_meta(event.run_id), RedisTTL.RUN_META)
                 await self._redis.set(
-                    f"hfa:run:state:{event.run_id}", "scheduled", ex=86400
+                    RedisKey.run_state(event.run_id), "scheduled", ex=RedisTTL.RUN_STATE
                 )
 
                 await self._redis.zadd(
@@ -259,6 +255,18 @@ class Scheduler:
                 _set_attr(sp, "hfa.worker_group", worker_group)
                 _set_attr(sp, "hfa.shard", str(shard))
                 _set_attr(sp, "hfa.policy", policy)
+
+                # Sprint 14C: fairness accounting hook
+                # Only updates AFTER all Redis writes succeed.
+                # Never updates on PlacementError or unexpected exception.
+                try:
+                    self._tenant_fairness.update_on_dispatch(
+                        event.tenant_id,
+                        cost=self._fairness_cost(event),
+                    )
+                except Exception:
+                    pass  # fairness is instrumentation — never block scheduling
+
                 logger.info(
                     "Scheduled: run=%s group=%s shard=%d policy=%s",
                     event.run_id,
@@ -272,7 +280,7 @@ class Scheduler:
                 if _M:
                     _M.scheduling_failures_total.inc()
                 await self._redis.set(
-                    f"hfa:run:state:{event.run_id}", "failed", ex=86400
+                    RedisKey.run_state(event.run_id), "failed", ex=RedisTTL.RUN_STATE
                 )
             except Exception as exc:
                 logger.error(
@@ -281,6 +289,25 @@ class Scheduler:
                     exc,
                     exc_info=True,
                 )
+
+    # ------------------------------------------------------------------
+    # Fairness helpers
+    # ------------------------------------------------------------------
+
+    def _fairness_cost(self, event: RunAdmittedEvent) -> float:
+        """
+        Compute fairness accounting cost for a dispatched run.
+
+        Rules
+        -----
+        * If estimated_cost_cents is missing or <= 0: default to 1.0.
+        * Otherwise: cost_cents / 100, clamped to [1.0, 100.0].
+        * Ensures vruntime increments are bounded and comparable across tenants.
+        """
+        cost_cents = getattr(event, "estimated_cost_cents", 0) or 0
+        if cost_cents <= 0:
+            return 1.0
+        return max(1.0, min(float(cost_cents) / 100.0, 100.0))
 
     # ------------------------------------------------------------------
     # Policy implementations
