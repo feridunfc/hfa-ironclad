@@ -17,11 +17,8 @@ from __future__ import annotations
 import pytest
 import fakeredis.aioredis as faredis
 
-from tests.core.test_sprint10_scheduler import _cfg, _event, _make_sched, _worker
+from tests.core.test_sprint10_scheduler import _event, _make_sched, _worker
 from hfa.events.schema import RunAdmittedEvent
-from hfa_control.scheduler import Scheduler
-from hfa_control.models import ControlPlaneConfig, WorkerProfile, WorkerStatus
-from unittest.mock import AsyncMock
 
 
 # ---------------------------------------------------------------------------

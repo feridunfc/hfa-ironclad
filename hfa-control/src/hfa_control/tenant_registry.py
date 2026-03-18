@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from hfa.config.keys import RedisKey, RedisTTL, TTL
+from hfa.config.keys import RedisKey, RedisTTL
 
 
 # Legacy module-level constants kept for any external importers.

@@ -11,7 +11,6 @@ Verifies that:
 
 from __future__ import annotations
 
-import pytest
 
 from hfa.config.keys import RedisKey, RedisTTL, TTL
 
