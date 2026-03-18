@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from hfa.config.keys import RedisKey, RedisTTL
 
+# Legacy module-level constants kept for any external importers.
+# New code should use RedisKey.tenant_config() / RedisKey.tenant_inflight().
 TENANT_CONFIG_KEY = "hfa:tenant:{tenant_id}:config"
 TENANT_INFLIGHT_KEY = "hfa:tenant:{tenant_id}:inflight"
 
@@ -57,16 +60,14 @@ class TenantRegistry:
     """
     Sprint 14A tenant config + inflight state primitives.
 
-    Note:
-    - this does not enforce admission limits yet
-    - hard admission/rate enforcement is deferred to Sprint 14B
+    All Redis keys use RedisKey builders; all TTLs use RedisTTL constants.
     """
 
     def __init__(self, redis):
         self._redis = redis
 
     async def get_config(self, tenant_id: str) -> TenantConfig:
-        key = TENANT_CONFIG_KEY.format(tenant_id=tenant_id)
+        key = RedisKey.tenant_config(tenant_id)
         raw = await self._redis.hgetall(key)
 
         decoded: dict[str, str] = {}
@@ -80,7 +81,7 @@ class TenantRegistry:
         return TenantConfig.from_redis(tenant_id, decoded)
 
     async def update_weight(self, tenant_id: str, weight: int) -> TenantConfig:
-        key = TENANT_CONFIG_KEY.format(tenant_id=tenant_id)
+        key = RedisKey.tenant_config(tenant_id)
         await self._redis.hset(key, "weight", str(max(1, weight)))
         return await self.get_config(tenant_id)
 
@@ -91,7 +92,7 @@ class TenantRegistry:
         max_inflight_runs: Optional[int] = None,
         max_runs_per_second: Optional[float] = None,
     ) -> TenantConfig:
-        key = TENANT_CONFIG_KEY.format(tenant_id=tenant_id)
+        key = RedisKey.tenant_config(tenant_id)
 
         if max_inflight_runs is not None:
             await self._redis.hset(key, "max_inflight_runs", str(max_inflight_runs))
@@ -103,7 +104,7 @@ class TenantRegistry:
         return await self.get_config(tenant_id)
 
     async def get_inflight(self, tenant_id: str) -> int:
-        key = TENANT_INFLIGHT_KEY.format(tenant_id=tenant_id)
+        key = RedisKey.tenant_inflight(tenant_id)
         value = await self._redis.get(key)
         if value is None:
             return 0
@@ -113,13 +114,13 @@ class TenantRegistry:
             return 0
 
     async def increment_inflight(self, tenant_id: str) -> int:
-        key = TENANT_INFLIGHT_KEY.format(tenant_id=tenant_id)
+        key = RedisKey.tenant_inflight(tenant_id)
         value = await self._redis.incr(key)
-        await self._redis.expire(key, 86400)
+        await self._redis.expire(key, RedisTTL.TENANT_INFLIGHT)
         return int(value)
 
     async def decrement_inflight(self, tenant_id: str) -> int:
-        key = TENANT_INFLIGHT_KEY.format(tenant_id=tenant_id)
+        key = RedisKey.tenant_inflight(tenant_id)
         value = await self._redis.get(key)
 
         if value is None:
@@ -132,5 +133,5 @@ class TenantRegistry:
 
         new_value = max(0, current - 1)
         await self._redis.set(key, str(new_value))
-        await self._redis.expire(key, 86400)
+        await self._redis.expire(key, RedisTTL.TENANT_INFLIGHT)
         return new_value

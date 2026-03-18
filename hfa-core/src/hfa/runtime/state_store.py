@@ -2,13 +2,14 @@
 hfa-core/src/hfa/runtime/state_store.py
 IRONCLAD Sprint 11 --- State Management Helpers (FINAL)
 """
-
 from __future__ import annotations
 
 import json
 import logging
 import time
 from typing import Any, Dict, Optional
+
+from hfa.config.keys import RedisTTL
 
 logger = logging.getLogger(__name__)
 
@@ -17,16 +18,25 @@ class StateStore:
     """
     Centralized state management for runs.
     Enforces consistent Redis contracts.
+
+    All key patterns and TTL values are sourced from hfa.config.keys.
     """
 
+    # Legacy class-level constants preserved for backward compatibility.
     STATE_KEY = "hfa:run:state:{}"
     META_KEY = "hfa:run:meta:{}"
     RESULT_KEY = "hfa:run:result:{}"
     RUNNING_ZSET = "hfa:cp:running"
     EXECUTION_TOKEN_KEY = "hfa:run:claim:{}"
 
-    TTL = 86400
-    CLAIM_TTL = 900  # 15 minutes
+    # Backward-compatible aliases
+    TTL = RedisTTL.RUN_STATE
+    CLAIM_TTL = RedisTTL.RUN_CLAIM
+
+    # Preferred names for new code
+    STATE_TTL = RedisTTL.RUN_STATE
+    META_TTL = RedisTTL.RUN_META
+    RESULT_TTL = RedisTTL.RUN_RESULT
 
     def __init__(self, redis):
         self._redis = redis

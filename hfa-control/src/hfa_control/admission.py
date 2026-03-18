@@ -29,6 +29,7 @@ import logging
 import time
 from typing import Optional
 
+from hfa.config.keys import RedisKey, RedisTTL
 from hfa.events.codec import serialize_event
 from hfa.events.schema import RunAdmittedEvent
 
@@ -91,6 +92,18 @@ class AdmissionController:
         self._tenant_registry = tenant_registry
         self._rate_limiter = rate_limiter
 
+    async def initialise(self) -> None:
+        """
+        Pre-warm the rate limiter by loading the Lua script into Redis.
+
+        Should be called once at Control Plane startup (in ControlPlaneService.start()).
+        Safe to skip — check_and_consume() auto-initialises on first call —
+        but calling here avoids a cold-start latency spike on the first admission.
+        """
+        if self._rate_limiter is not None:
+            await self._rate_limiter.initialise()
+            logger.info("AdmissionController: rate limiter initialised (EVALSHA ready)")
+
     async def _tenant_inflight_allowed(
         self, tenant_id: str
     ) -> tuple[bool, Optional[str]]:
@@ -139,9 +152,13 @@ class AdmissionController:
         """
         run_id = request.run_id
 
-        await self._redis.set(f"hfa:run:state:{run_id}", "rejected", ex=86400)
+        await self._redis.set(
+            RedisKey.run_state(run_id),
+            "rejected",
+            ex=RedisTTL.RUN_STATE,
+        )
         await self._redis.hset(
-            f"hfa:run:meta:{run_id}",
+            RedisKey.run_meta(run_id),
             mapping={
                 "run_id": run_id,
                 "tenant_id": request.tenant_id,
@@ -150,7 +167,10 @@ class AdmissionController:
                 "rejected_at": str(time.time()),
             },
         )
-        await self._redis.expire(f"hfa:run:meta:{run_id}", 86400)
+        await self._redis.expire(
+            RedisKey.run_meta(run_id),
+            RedisTTL.RUN_META,
+        )
 
         logger.info(
             "Run rejected: run=%s tenant=%s reason=%s",
@@ -288,9 +308,9 @@ class AdmissionController:
                     approximate=True,
                 )
                 await self._redis.set(
-                    f"hfa:run:state:{request.run_id}",
+                    RedisKey.run_state(request.run_id),
                     "admitted",
-                    ex=86400,
+                    ex=RedisTTL.RUN_STATE,
                 )
 
                 logger.info(
