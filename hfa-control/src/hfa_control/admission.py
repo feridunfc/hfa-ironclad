@@ -29,6 +29,8 @@ import logging
 import time
 from typing import Optional
 
+from hfa.config.keys import RedisKey, RedisTTL
+
 from hfa.events.codec import serialize_event
 from hfa.events.schema import RunAdmittedEvent
 
@@ -139,9 +141,9 @@ class AdmissionController:
         """
         run_id = request.run_id
 
-        await self._redis.set(f"hfa:run:state:{run_id}", "rejected", ex=86400)
+        await self._redis.set(RedisKey.run_state(run_id), "rejected", ex=RedisTTL.RUN_STATE)
         await self._redis.hset(
-            f"hfa:run:meta:{run_id}",
+            RedisKey.run_meta(run_id),
             mapping={
                 "run_id": run_id,
                 "tenant_id": request.tenant_id,
@@ -150,7 +152,7 @@ class AdmissionController:
                 "rejected_at": str(time.time()),
             },
         )
-        await self._redis.expire(f"hfa:run:meta:{run_id}", 86400)
+        await self._redis.expire(RedisKey.run_meta(run_id), RedisTTL.RUN_META)
 
         logger.info(
             "Run rejected: run=%s tenant=%s reason=%s",
@@ -288,9 +290,9 @@ class AdmissionController:
                     approximate=True,
                 )
                 await self._redis.set(
-                    f"hfa:run:state:{request.run_id}",
+                    RedisKey.run_state(request.run_id),
                     "admitted",
-                    ex=86400,
+                    ex=RedisTTL.RUN_STATE,
                 )
 
                 logger.info(

@@ -13,11 +13,13 @@ from typing import Callable, List, Optional
 
 from hfa.events.codec import serialize_event
 from hfa.events.schema import WorkerHeartbeatEvent
+from hfa.config.keys import RedisKey
 
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL = float(os.environ.get("WORKER_HEARTBEAT_INTERVAL", "10"))
-HEARTBEAT_STREAM = "hfa:stream:heartbeat"
+# Module-level constant kept for any external importers; uses canonical key.
+HEARTBEAT_STREAM = RedisKey.stream_heartbeat()
 
 
 class WorkerHeartbeatPublisher:

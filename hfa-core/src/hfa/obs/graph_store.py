@@ -25,6 +25,8 @@ import json
 import logging
 from typing import Any
 
+from hfa.config.keys import RedisKey, RedisTTL, TTL
+
 logger = logging.getLogger(__name__)
 
 
@@ -61,8 +63,9 @@ class GraphStore(abc.ABC):
 
 
 class RedisGraphStore(GraphStore):
-    SNAP_TTL = 86_400
-    PATCH_TTL = 86_400
+    # Class-level aliases kept for any subclasses; use TTL constants directly.
+    SNAP_TTL = TTL.RUN_META
+    PATCH_TTL = TTL.RUN_META
 
     def __init__(self, redis) -> None:
         self._redis = redis
@@ -72,14 +75,14 @@ class RedisGraphStore(GraphStore):
     async def save_snapshot(self, run_id: str, graph_json: str) -> None:
         try:
             await self._redis.set(
-                f"hfa:graph:snap:{run_id}", graph_json, ex=self.SNAP_TTL
+                RedisKey.graph_snapshot(run_id), graph_json, ex=TTL.RUN_META
             )
         except Exception as exc:
             logger.error("GraphStore.save_snapshot error run=%s: %s", run_id, exc)
 
     async def load_snapshot(self, run_id: str) -> str | None:
         try:
-            raw = await self._redis.get(f"hfa:graph:snap:{run_id}")
+            raw = await self._redis.get(RedisKey.graph_snapshot(run_id))
             if raw is None:
                 return None
             return raw.decode() if isinstance(raw, bytes) else raw
@@ -89,9 +92,9 @@ class RedisGraphStore(GraphStore):
 
     async def append_patch(self, run_id: str, patch: dict[str, Any]) -> None:
         try:
-            key = f"hfa:graph:patch:{run_id}"
+            key = RedisKey.graph_patch(run_id)
             await self._redis.rpush(key, json.dumps(patch, default=str))
-            await self._redis.expire(key, self.PATCH_TTL)
+            await self._redis.expire(key, TTL.RUN_META)
         except Exception as exc:
             logger.error("GraphStore.append_patch error run=%s: %s", run_id, exc)
 
@@ -99,7 +102,7 @@ class RedisGraphStore(GraphStore):
         self, run_id: str, after_seq: int = 0
     ) -> list[dict[str, Any]]:
         try:
-            raw_list = await self._redis.lrange(f"hfa:graph:patch:{run_id}", 0, -1)
+            raw_list = await self._redis.lrange(RedisKey.graph_patch(run_id), 0, -1)
             out: list[dict[str, Any]] = []
             for i, raw in enumerate(raw_list):
                 try:
@@ -118,14 +121,14 @@ class RedisGraphStore(GraphStore):
     async def delete(self, run_id: str) -> None:
         try:
             await self._redis.delete(
-                f"hfa:graph:snap:{run_id}",
-                f"hfa:graph:patch:{run_id}",
+                RedisKey.graph_snapshot(run_id),
+                RedisKey.graph_patch(run_id),
             )
         except Exception as exc:
             logger.error("GraphStore.delete error run=%s: %s", run_id, exc)
 
     async def next_seq(self, run_id: str) -> int:
         try:
-            return await self._redis.llen(f"hfa:graph:patch:{run_id}")
+            return await self._redis.llen(RedisKey.graph_patch(run_id))
         except Exception:
             return 0
