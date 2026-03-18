@@ -25,7 +25,7 @@ import json
 import logging
 from typing import Any
 
-from hfa.config.keys import RedisKey, RedisTTL, TTL
+from hfa.config.keys import RedisKey, TTL
 
 logger = logging.getLogger(__name__)
 
