@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional, Any
+from typing import Optional
 
 from hfa.config.keys import RedisKey, RedisTTL
 from hfa.events.codec import serialize_event
