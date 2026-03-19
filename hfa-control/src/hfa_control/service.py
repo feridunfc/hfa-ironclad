@@ -26,6 +26,11 @@ from hfa_control.leader import LeaderElection
 from hfa_control.registry import WorkerRegistry
 from hfa_control.shard import ShardOwnershipManager
 from hfa_control.admission import AdmissionController
+from hfa_control.tenant_registry import TenantRegistry
+from hfa_control.rate_limit import TenantRateLimiter
+from hfa_control.audit import AuditLogger
+from hfa_control.audit_store import RedisLedgerStore
+from hfa_control.redis_resilience import RedisHealthMonitor
 from hfa_control.scheduler import Scheduler
 from hfa_control.recovery import RecoveryService
 from hfa.config.keys import RedisKey
@@ -48,7 +53,20 @@ class ControlPlaneService:
         self._leader = LeaderElection(redis, self._config.instance_id, self._config)
         self._registry = WorkerRegistry(redis, self._config)
         self._shards = ShardOwnershipManager(redis, self._config)
-        self._admitter = AdmissionController(redis, self._config)
+
+        self._tenant_registry = TenantRegistry(redis)
+        self._rate_limiter = TenantRateLimiter(redis)
+        self._audit_store = RedisLedgerStore(redis)
+        self._audit_logger = AuditLogger(self._audit_store)
+        self._redis_health = RedisHealthMonitor(redis)
+
+        self._admitter = AdmissionController(
+            redis,
+            self._config,
+            tenant_registry=self._tenant_registry,
+            rate_limiter=self._rate_limiter,
+            audit=self._audit_logger,
+        )
         self._scheduler = Scheduler(redis, self._registry, self._shards, self._config)
         self._recovery = RecoveryService(redis, self._config)
 
@@ -73,6 +91,14 @@ class ControlPlaneService:
         return self._recovery
 
     @property
+    def audit_logger(self) -> AuditLogger:
+        return self._audit_logger
+
+    @property
+    def redis_healthy(self) -> bool:
+        return self._redis_health.is_healthy
+
+    @property
     def shards(self) -> ShardOwnershipManager:
         return self._shards
 
@@ -85,6 +111,11 @@ class ControlPlaneService:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
+        # Sprint 17 components
+        await self._redis_health.start()
+        await self._audit_logger.start()
+        await self._admitter.initialise()
+
         # All instances run registry and shard monitor
         await self._registry.start()
         await self._shards.start()
@@ -119,6 +150,8 @@ class ControlPlaneService:
         await self._shards.close()
         await self._registry.close()
         await self._leader.close()
+        await self._audit_logger.close()
+        await self._redis_health.close()
 
         logger.info("ControlPlaneService closed: instance=%s", self._config.instance_id)
 

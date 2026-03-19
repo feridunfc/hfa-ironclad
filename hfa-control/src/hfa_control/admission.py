@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
+from typing import Optional, Any
 
 from hfa.config.keys import RedisKey, RedisTTL
 from hfa.events.codec import serialize_event
@@ -58,6 +58,7 @@ from hfa_control.exceptions import (
 )
 from hfa_control.rate_limit import TenantRateLimiter
 from hfa_control.tenant_registry import TenantRegistry
+from hfa_control.audit import AuditLogger
 
 logger = logging.getLogger(__name__)
 
@@ -85,12 +86,14 @@ class AdmissionController:
         config,
         tenant_registry: Optional[TenantRegistry] = None,
         rate_limiter: Optional[TenantRateLimiter] = None,
+        audit: Optional[AuditLogger] = None,
     ) -> None:
         self._redis = redis
         self._config = config
         self._quota = QuotaManager(redis) if QuotaManager else None
         self._tenant_registry = tenant_registry
         self._rate_limiter = rate_limiter
+        self._audit = audit
 
     async def initialise(self) -> None:
         """
@@ -171,6 +174,9 @@ class AdmissionController:
             RedisKey.run_meta(run_id),
             RedisTTL.RUN_META,
         )
+
+        if self._audit:
+            self._audit.run_rejected(run_id, request.tenant_id, reason)
 
         logger.info(
             "Run rejected: run=%s tenant=%s reason=%s",
@@ -277,6 +283,13 @@ class AdmissionController:
                 if self._tenant_registry:
                     await self._tenant_registry.increment_inflight(request.tenant_id)
                     incremented_tenant_inflight = True
+
+                if self._audit:
+                    self._audit.run_admitted(
+                        run_id=request.run_id,
+                        tenant_id=request.tenant_id,
+                        metadata={"agent_type": request.agent_type},
+                    )
 
                 evt = RunAdmittedEvent(
                     run_id=request.run_id,

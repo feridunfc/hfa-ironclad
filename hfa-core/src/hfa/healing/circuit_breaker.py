@@ -1,102 +1,102 @@
 """
 hfa-core/src/hfa/healing/circuit_breaker.py
-IRONCLAD Sprint 1 STUB — Full state-machine implemented in Sprint 4.
-This stub keeps Sprint 1 fully runnable without Sprint 4 code.
+IRONCLAD Sprint 17.3 --- Async Circuit Breaker
 """
 
+from __future__ import annotations
+
+import asyncio
 import logging
 import time
 from enum import Enum
-from threading import Lock
+from typing import Any, Awaitable, Callable, TypeVar
 
 logger = logging.getLogger(__name__)
 
+T = TypeVar("T")
 
-class CircuitState(str, Enum):
+
+class CircuitState(Enum):
     CLOSED = "closed"
     OPEN = "open"
     HALF_OPEN = "half_open"
 
 
 class CircuitOpenError(Exception):
-    """Raised when circuit breaker is open and requests are blocked."""
+    """Raised when circuit is OPEN."""
 
 
 class CircuitBreaker:
-    """
-    Sprint-1 stub: thread-safe circuit breaker.
-
-    States:
-      CLOSED     → normal operation
-      OPEN       → fail-fast, no calls allowed
-      HALF_OPEN  → one probe call allowed after recovery_timeout
-
-    Sprint 4 adds: fingerprint-based deduplication, Redis persistence,
-    Prometheus metrics, and full self-healing integration.
-    """
-
     def __init__(
         self,
         name: str,
         failure_threshold: int = 5,
-        recovery_timeout: int = 60,
+        recovery_timeout: float = 30.0,
+        half_open_max_calls: int = 1,
     ) -> None:
         self.name = name
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
+        self.half_open_max_calls = half_open_max_calls
 
-        self._state: CircuitState = CircuitState.CLOSED
-        self._failure_count: int = 0
-        self._last_failure_time: float = 0.0
-        self._lock = Lock()
-
-        logger.info(
-            "CircuitBreaker(%s) initialised: threshold=%d, recovery=%ds",
-            name,
-            failure_threshold,
-            recovery_timeout,
-        )
-
-    def is_open(self) -> bool:
-        """Return True when the circuit is fully open (fail-fast mode)."""
-        with self._lock:
-            if self._state == CircuitState.OPEN:
-                if time.monotonic() - self._last_failure_time >= self.recovery_timeout:
-                    self._state = CircuitState.HALF_OPEN
-                    logger.info(
-                        "CircuitBreaker(%s) → HALF_OPEN (probe window)", self.name
-                    )
-                    return False
-                return True
-            return False
-
-    def record_success(self) -> None:
-        """Call after a successful operation to reset the breaker."""
-        with self._lock:
-            if self._state != CircuitState.CLOSED:
-                logger.info("CircuitBreaker(%s) → CLOSED (success)", self.name)
-            self._state = CircuitState.CLOSED
-            self._failure_count = 0
-
-    def record_failure(self) -> None:
-        """Call after a failed operation; trips the breaker at threshold."""
-        with self._lock:
-            self._failure_count += 1
-            self._last_failure_time = time.monotonic()
-
-            if self._failure_count >= self.failure_threshold:
-                if self._state != CircuitState.OPEN:
-                    logger.warning(
-                        "CircuitBreaker(%s) → OPEN after %d failures",
-                        self.name,
-                        self._failure_count,
-                    )
-                self._state = CircuitState.OPEN
+        self._state = CircuitState.CLOSED
+        self._failure_count = 0
+        self._last_failure_time = 0.0
+        self._half_open_calls = 0
+        self._lock = asyncio.Lock()
 
     @property
     def state(self) -> CircuitState:
         return self._state
 
-    @property
-    def failure_count(self) -> int:
-        return self._failure_count
+    async def call(self, func: Callable[..., Awaitable[T]], *args: Any, **kwargs: Any) -> T:
+        async with self._lock:
+            if self._state == CircuitState.OPEN:
+                if time.time() - self._last_failure_time > self.recovery_timeout:
+                    logger.info("Circuit %s transitioning OPEN → HALF_OPEN", self.name)
+                    self._state = CircuitState.HALF_OPEN
+                    self._half_open_calls = 0
+                else:
+                    raise CircuitOpenError(f"Circuit {self.name} is open")
+
+            if self._state == CircuitState.HALF_OPEN:
+                if self._half_open_calls >= self.half_open_max_calls:
+                    raise CircuitOpenError(f"Circuit {self.name} is half-open (busy)")
+                self._half_open_calls += 1
+
+        try:
+            result = await func(*args, **kwargs)
+        except Exception:
+            await self._record_failure()
+            raise
+
+        await self._record_success()
+        return result
+
+    async def _record_failure(self) -> None:
+        async with self._lock:
+            self._failure_count += 1
+            self._last_failure_time = time.time()
+
+            if self._state == CircuitState.HALF_OPEN:
+                logger.warning("Circuit %s HALF_OPEN test call failed → OPEN", self.name)
+                self._state = CircuitState.OPEN
+                self._half_open_calls = 0
+            elif self._state == CircuitState.CLOSED and self._failure_count >= self.failure_threshold:
+                logger.warning(
+                    "Circuit %s CLOSED → OPEN (failures=%d/%d)",
+                    self.name,
+                    self._failure_count,
+                    self.failure_threshold,
+                )
+                self._state = CircuitState.OPEN
+
+    async def _record_success(self) -> None:
+        async with self._lock:
+            if self._state == CircuitState.HALF_OPEN:
+                logger.info("Circuit %s HALF_OPEN test call succeeded → CLOSED", self.name)
+                self._state = CircuitState.CLOSED
+                self._failure_count = 0
+                self._half_open_calls = 0
+            elif self._state == CircuitState.CLOSED:
+                self._failure_count = 0

@@ -42,7 +42,6 @@ IRONCLAD rules
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 from typing import List
 
@@ -58,6 +57,7 @@ from hfa_control.exceptions import (
     TenantMismatchError,
     LeadershipError,
 )
+from hfa_control import auth
 from hfa_control.api.models import (
     WorkerResponse,
     ShardResponse,
@@ -83,12 +83,10 @@ from hfa_control.api.models import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/control/v1", tags=["control-plane"])
 
-_CP_AUTH_SECRET = os.environ.get("CP_AUTH_SECRET", "")
-
-
 def _require_operator(x_cp_auth: str = "") -> None:
-    if _CP_AUTH_SECRET and x_cp_auth != _CP_AUTH_SECRET:
-        raise HTTPException(status_code=403, detail="Operator auth required")
+    """Validate operator token using the Sprint 17 auth module."""
+    if not auth.validate_operator_token(x_cp_auth):
+        raise HTTPException(status_code=403, detail="Invalid operator token")
 
 
 def _tenant_header(x_tenant_id: str) -> str:
@@ -523,6 +521,8 @@ async def replay_dlq(
     _require_operator(x_cp_auth)
     try:
         await request.app.state.cp.recovery.replay_dlq_run(run_id, x_tenant_id)
+        if hasattr(request.app.state.cp, "audit_logger"):
+            request.app.state.cp.audit_logger.dlq_replay(run_id, x_tenant_id)
         return {"run_id": run_id, "status": "replayed"}
     except DLQEntryNotFoundError:
         raise HTTPException(status_code=404, detail=f"DLQ entry {run_id!r} not found")
