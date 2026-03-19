@@ -164,6 +164,16 @@ class RedisKey:
         """hfa:tenant:{tenant_id}:rate — sliding-window ZSET."""
         return f"{cls.PREFIX}:tenant:{tenant_id}:rate"
 
+    @classmethod
+    def tenant_queue(cls, tenant_id: str) -> str:
+        """hfa:tenant:{tenant_id}:queue — per-tenant run ZSET (score=priority+time)."""
+        return f"{cls.PREFIX}:tenant:{tenant_id}:queue"
+
+    @classmethod
+    def tenant_active_set(cls) -> str:
+        """hfa:cp:tenant:active — SET of tenant_ids with non-empty queues."""
+        return f"{cls.PREFIX}:cp:tenant:active"
+
     # ------------------------------------------------------------------
     # Control-plane keys
     # ------------------------------------------------------------------

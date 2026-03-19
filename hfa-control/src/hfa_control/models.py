@@ -125,3 +125,5 @@ class ControlPlaneConfig:
     # XAUTOCLAIM settings
     autoclaim_idle_ms: int = 30_000  # reclaim after 30s idle in PEL
     autoclaim_count: int = 10
+    # Sprint 16: enable tenant-aware fair scheduling queue
+    fair_scheduling: bool = False

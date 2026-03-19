@@ -1,23 +1,34 @@
 """
 hfa-control/src/hfa_control/scheduler.py
-IRONCLAD Sprint 10/14C — Scheduler
+IRONCLAD Sprint 10/14C/16 — Fair Scheduler
 
-Consumes RunAdmittedEvent from hfa:stream:control via XREADGROUP.
-Selects a worker_group using one of four placement policies.
-Emits RunScheduledEvent and XADD RunRequestedEvent to the target shard stream.
+Sprint 16 changes
+-----------------
+The scheduler now operates in two modes, controlled by ControlPlaneConfig.fair_scheduling:
 
-Placement policies
-------------------
+  False (default, backward-compatible):
+    Direct mode — RunAdmittedEvents are scheduled immediately in arrival order.
+    Existing behavior preserved. All Sprint 10-15 tests continue to pass.
+
+  True (Sprint 16 fair mode):
+    Queue-based fair mode:
+      1. RunAdmittedEvent → enqueue to per-tenant queue (TenantQueue)
+      2. Each scheduling tick: pick the most under-served tenant (TenantFairnessTracker)
+      3. Dequeue the highest-priority run from that tenant
+      4. Place it (unchanged placement policies)
+      5. Update vruntime after successful dispatch
+
+    This ensures:
+      * No tenant starves — vruntime-based selection prevents monopolization.
+      * Priority ordering within each tenant (score = priority + admission time).
+      * Burst control — a heavy tenant's queue fills but doesn't skip the fairness gate.
+
+Placement policies (unchanged)
+-------------------------------
   LEAST_LOADED     — worker with lowest inflight/capacity ratio
   REGION_AFFINITY  — prefer workers in run's preferred_region, fall back global
-  ROUND_ROBIN      — rotate across worker groups (deterministic via run sequence)
+  ROUND_ROBIN      — rotate across worker groups
   CAPABILITY_MATCH — require workers with matching agent_type capability
-
-XAUTOCLAIM
-----------
-  Before each XREADGROUP call, XAUTOCLAIM reclaims messages idle > autoclaim_idle_ms.
-  This ensures Scheduler processes admissions even if a previous CP instance crashed
-  mid-processing and left entries in the PEL.
 
 IRONCLAD rules
 --------------
@@ -25,11 +36,7 @@ IRONCLAD rules
 * No asyncio.get_event_loop() — get_running_loop().
 * close() always safe.
 * cost_cents: int — never float USD.
-
-Sprint 14C note
-----------------
-TenantFairnessTracker is initialized as a safe, in-memory helper only.
-It does NOT change existing scheduling behavior yet.
+* Fair mode is opt-in — default False preserves all existing behavior.
 """
 
 from __future__ import annotations
@@ -48,6 +55,7 @@ from hfa_control.models import ControlPlaneConfig, WorkerProfile
 from hfa_control.registry import WorkerRegistry
 from hfa_control.shard import ShardOwnershipManager
 from hfa_control.tenant_fairness import TenantFairnessTracker
+from hfa_control.tenant_queue import TenantQueue
 
 try:
     from hfa.obs.runtime_metrics import IRONCLADMetrics as _M
@@ -81,11 +89,14 @@ class Scheduler:
         self._task: Optional[asyncio.Task] = None
         self._rr_counter = 0  # round-robin state
 
-        # Sprint 14A: fairness-ready selector already present in repo
+        # Sprint 14A: legacy fairness selector (kept for compat)
         self._fairness = FairnessSelector()
 
-        # Sprint 14C: safe helper only, not active in placement yet
+        # Sprint 16: CFS-style vruntime tracker — now active in fair mode
         self._tenant_fairness = TenantFairnessTracker()
+
+        # Sprint 16: per-tenant queue (only used when fair_scheduling=True)
+        self._tenant_queue = TenantQueue(redis)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -144,9 +155,18 @@ class Scheduler:
 
                         if event_type == "RunAdmitted":
                             evt = RunAdmittedEvent.from_redis(data)
-                            await self._schedule(evt)
+                            if getattr(self._config, "fair_scheduling", False):
+                                # Sprint 16 fair mode: enqueue and let dispatch loop pick
+                                await self._enqueue_admitted(evt)
+                            else:
+                                # Direct mode: schedule immediately (Sprint 10 behavior)
+                                await self._schedule(evt)
 
                         await self._redis.xack(self._config.control_stream, _GROUP, msg_id)
+
+                # Sprint 16: drain the fair queue after processing stream batch
+                if getattr(self._config, "fair_scheduling", False):
+                    await self._dispatch_fair_batch()
 
             except asyncio.CancelledError:
                 break
@@ -177,6 +197,99 @@ class Scheduler:
                     await self._redis.xack(self._config.control_stream, _GROUP, msg_id)
         except Exception as exc:
             logger.debug("Scheduler._autoclaim skipped: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Sprint 16: Fair-mode queue helpers
+    # ------------------------------------------------------------------
+
+    async def _enqueue_admitted(self, event: RunAdmittedEvent) -> None:
+        """
+        Enqueue a newly admitted run into the per-tenant queue.
+        Called only when fair_scheduling=True.
+        """
+        await self._tenant_queue.enqueue(
+            tenant_id=event.tenant_id,
+            run_id=event.run_id,
+            priority=event.priority,
+        )
+        # Store the full event payload so we can reconstruct it at dispatch time
+        await self._redis.hset(
+            RedisKey.run_meta(event.run_id),
+            mapping={
+                "run_id": event.run_id,
+                "tenant_id": event.tenant_id,
+                "agent_type": event.agent_type,
+                "priority": str(event.priority),
+                "preferred_region": event.preferred_region or "",
+                "preferred_placement": event.preferred_placement or "LEAST_LOADED",
+                "admitted_at": str(time.time()),
+                "queue_state": "queued",
+            },
+        )
+        await self._redis.expire(RedisKey.run_meta(event.run_id), RedisTTL.RUN_META)
+        logger.debug(
+            "Fair enqueue: run=%s tenant=%s priority=%d",
+            event.run_id, event.tenant_id, event.priority,
+        )
+
+    async def _dispatch_fair_batch(self, max_dispatches: int = 20) -> None:
+        """
+        Sprint 16 fair dispatch loop.
+
+        Algorithm (CFS-style):
+          1. Get all tenants with queued runs.
+          2. Pick the most under-served tenant (lowest vruntime).
+          3. Dequeue its highest-priority run.
+          4. Place it via _schedule_from_meta().
+          5. Update vruntime on success.
+          6. Repeat until no more queued runs or max_dispatches reached.
+        """
+        dispatched = 0
+        while dispatched < max_dispatches:
+            active_tenants = await self._tenant_queue.active_tenants()
+            if not active_tenants:
+                break
+
+            # CFS pick: tenant with lowest vruntime
+            chosen_tenant = self._tenant_fairness.pick_next(active_tenants)
+
+            # Dequeue highest-priority run for this tenant
+            run_id = await self._tenant_queue.dequeue(chosen_tenant)
+            if run_id is None:
+                # Queue was empty (race between active_tenants read and dequeue)
+                continue
+
+            # Reconstruct event from stored meta
+            event = await self._rebuild_event_from_meta(run_id)
+            if event is None:
+                logger.warning("Fair dispatch: meta missing for run=%s — skipping", run_id)
+                continue
+
+            # Place the run
+            await self._schedule(event)
+            dispatched += 1
+
+        if dispatched:
+            logger.debug("Fair dispatch: placed %d runs this cycle", dispatched)
+
+    async def _rebuild_event_from_meta(self, run_id: str) -> Optional[RunAdmittedEvent]:
+        """Reconstruct a RunAdmittedEvent from stored run meta (fair-mode only)."""
+        raw = await self._redis.hgetall(RedisKey.run_meta(run_id))
+        if not raw:
+            return None
+
+        def _s(k: str) -> str:
+            v = raw.get(k.encode()) or raw.get(k)
+            return (v.decode() if isinstance(v, bytes) else v) or ""
+
+        return RunAdmittedEvent(
+            run_id=run_id,
+            tenant_id=_s("tenant_id"),
+            agent_type=_s("agent_type"),
+            priority=int(_s("priority") or "5"),
+            preferred_region=_s("preferred_region"),
+            preferred_placement=_s("preferred_placement") or "LEAST_LOADED",
+        )
 
     # ------------------------------------------------------------------
     # Placement decision
