@@ -24,7 +24,9 @@ async def _decrement_with_fallback(redis, inflight_key: str) -> int:
     try:
         # Real Redis path (atomic)
         return int(
-            await redis.eval(DECREMENT_SCRIPT, 1, inflight_key, RedisTTL.TENANT_INFLIGHT)
+            await redis.eval(
+                DECREMENT_SCRIPT, 1, inflight_key, RedisTTL.TENANT_INFLIGHT
+            )
             or 0
         )
 

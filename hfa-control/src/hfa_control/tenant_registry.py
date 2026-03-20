@@ -97,9 +97,7 @@ class TenantRegistry:
         if max_inflight_runs is not None:
             await self._redis.hset(key, "max_inflight_runs", str(max_inflight_runs))
         if max_runs_per_second is not None:
-            await self._redis.hset(
-                key, "max_runs_per_second", str(max_runs_per_second)
-            )
+            await self._redis.hset(key, "max_runs_per_second", str(max_runs_per_second))
 
         return await self.get_config(tenant_id)
 

@@ -43,4 +43,3 @@ async def xreadgroup_safe(
         block=block,
         noack=noack,
     )
-

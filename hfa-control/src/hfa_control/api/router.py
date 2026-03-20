@@ -57,7 +57,6 @@ from hfa_control.exceptions import (
     TenantMismatchError,
     LeadershipError,
 )
-from hfa_control import auth
 from hfa_control.api.models import (
     WorkerResponse,
     ShardResponse,
@@ -83,16 +82,21 @@ from hfa_control.api.models import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/control/v1", tags=["control-plane"])
 
+from hfa_control.auth import require_operator, require_tenant  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Backward-compat aliases (old names still used throughout this file)
+# ---------------------------------------------------------------------------
+
+
 def _require_operator(x_cp_auth: str = "") -> None:
-    """Validate operator token using the Sprint 17 auth module."""
-    if not auth.validate_operator_token(x_cp_auth):
-        raise HTTPException(status_code=403, detail="Invalid operator token")
+    """Delegate to auth module — constant-time HMAC validation."""
+    require_operator(x_cp_auth)
 
 
 def _tenant_header(x_tenant_id: str) -> str:
-    if not x_tenant_id:
-        raise HTTPException(status_code=400, detail="X-Tenant-ID header required")
-    return x_tenant_id
+    """Delegate to auth module."""
+    return require_tenant(x_tenant_id)
 
 
 # ===========================================================================
@@ -224,6 +228,9 @@ async def drain_worker(
         cfg.heartbeat_stream, serialize_event(evt), maxlen=10_000, approximate=True
     )
     logger.info("Drain initiated: worker=%s deadline=%s", worker_id, deadline)
+    audit = getattr(request.app.state.cp, "_audit", None)
+    if audit:
+        await audit.drain_started(worker_id=worker_id, operator="operator")
     return {
         "worker_id": worker_id,
         "drain_deadline_utc": deadline,
@@ -521,8 +528,11 @@ async def replay_dlq(
     _require_operator(x_cp_auth)
     try:
         await request.app.state.cp.recovery.replay_dlq_run(run_id, x_tenant_id)
-        if hasattr(request.app.state.cp, "audit_logger"):
-            request.app.state.cp.audit_logger.dlq_replay(run_id, x_tenant_id)
+        audit = getattr(request.app.state.cp, "_audit", None)
+        if audit:
+            await audit.dlq_replay(
+                run_id=run_id, tenant_id=x_tenant_id, operator="operator"
+            )
         return {"run_id": run_id, "status": "replayed"}
     except DLQEntryNotFoundError:
         raise HTTPException(status_code=404, detail=f"DLQ entry {run_id!r} not found")

@@ -144,9 +144,7 @@ class LuaScriptLoader:
                 return await fallback()
             if self._source:
                 logger.debug("LuaScriptLoader.run: no SHA, falling back to EVAL")
-                return await self._redis.eval(
-                    self._source, num_keys, *keys, *args
-                )
+                return await self._redis.eval(self._source, num_keys, *keys, *args)
             raise RuntimeError(
                 f"LuaScriptLoader not loaded — call await loader.load() first "
                 f"({self._path.name})"
@@ -172,9 +170,7 @@ class LuaScriptLoader:
                     "LuaScriptLoader: EVALSHA not supported (fakeredis), "
                     "falling back to EVAL"
                 )
-                return await self._redis.eval(
-                    self._source, num_keys, *keys, *args
-                )
+                return await self._redis.eval(self._source, num_keys, *keys, *args)
 
             raise
 
@@ -223,5 +219,6 @@ def _is_fakeredis_error(exc: Exception) -> bool:
         "unknown command" in msg
         or ("eval" in msg and "not supported" in msg)
         or "script_load" in msg
-        or "evalsha" in msg and "not" in msg
+        or "evalsha" in msg
+        and "not" in msg
     )

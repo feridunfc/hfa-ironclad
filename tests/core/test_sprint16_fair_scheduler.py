@@ -232,19 +232,20 @@ async def test_two_tenants_get_equal_share():
 
     await sched._dispatch_fair_batch(max_dispatches=6)
 
-    scheduled_a = 0
-    for i in range(6):
-        raw = await redis.get(f"hfa:run:state:run-a-{i}")
-        state = (raw.decode() if isinstance(raw, bytes) else raw) or ""
-        if state == "scheduled":
-            scheduled_a += 1
-
-    scheduled_b = 0
-    for i in range(6):
-        raw = await redis.get(f"hfa:run:state:run-b-{i}")
-        state = (raw.decode() if isinstance(raw, bytes) else raw) or ""
-        if state == "scheduled":
-            scheduled_b += 1
+    scheduled_a = sum(
+        [
+            1
+            for i in range(6)
+            if (await redis.get(f"hfa:run:state:run-a-{i}") or b"").decode() == "scheduled"
+        ]
+    )
+    scheduled_b = sum(
+        [
+            1
+            for i in range(6)
+            if (await redis.get(f"hfa:run:state:run-b-{i}") or b"").decode() == "scheduled"
+        ]
+    )
 
     assert abs(scheduled_a - scheduled_b) <= 1, (
         f"Unfair dispatch: alpha={scheduled_a} beta={scheduled_b}"
@@ -293,10 +294,14 @@ async def test_high_priority_run_dispatched_first_within_tenant():
         await redis.hset(
             f"hfa:run:meta:{run_id}",
             mapping={
-                "run_id": run_id, "tenant_id": "acme",
-                "agent_type": "coder", "priority": str(pri),
-                "preferred_region": "", "preferred_placement": "LEAST_LOADED",
-                "admitted_at": str(now), "queue_state": "queued",
+                "run_id": run_id,
+                "tenant_id": "acme",
+                "agent_type": "coder",
+                "priority": str(pri),
+                "preferred_region": "",
+                "preferred_placement": "LEAST_LOADED",
+                "admitted_at": str(now),
+                "queue_state": "queued",
             },
         )
         await redis.expire(f"hfa:run:meta:{run_id}", 86400)

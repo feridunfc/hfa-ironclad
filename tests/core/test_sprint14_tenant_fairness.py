@@ -25,7 +25,7 @@ class TestSprint14TenantFairness:
 
         tenants = [
             TenantPressure("tenant-a", inflight=10, weight=2),  # 5.0
-            TenantPressure("tenant-b", inflight=6, weight=1),   # 6.0
+            TenantPressure("tenant-b", inflight=6, weight=1),  # 6.0
         ]
 
         selected = selector.select_next_tenant(tenants)

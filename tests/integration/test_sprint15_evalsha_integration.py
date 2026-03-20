@@ -16,14 +16,16 @@ import pytest
 from pathlib import Path
 
 from hfa_control.rate_limit import TenantRateLimiter
-from hfa.lua.loader import LuaScriptLoader
+
+# from hfa.lua.loader import LuaScriptLoader
 from hfa.config.keys import RedisKey
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
-_LUA_PATH = Path(__file__).parent.parent.parent / \
-    "hfa-core" / "src" / "hfa" / "lua" / "rate_limit.lua"
+_LUA_PATH = (
+    Path(__file__).parent.parent.parent / "hfa-core" / "src" / "hfa" / "lua" / "rate_limit.lua"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -84,9 +86,7 @@ async def test_noscript_recovery_after_script_flush(real_redis):
     await real_redis.script_flush()
 
     # The next call should trigger NOSCRIPT → reload → retry
-    result = await limiter.check_and_consume(
-        "tenant-noscript", max_runs_per_second=5, now=3000.0
-    )
+    result = await limiter.check_and_consume("tenant-noscript", max_runs_per_second=5, now=3000.0)
     assert result is True
     sha_after = limiter._loader.sha
 

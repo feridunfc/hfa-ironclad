@@ -58,7 +58,6 @@ from hfa_control.exceptions import (
 )
 from hfa_control.rate_limit import TenantRateLimiter
 from hfa_control.tenant_registry import TenantRegistry
-from hfa_control.audit import AuditLogger
 
 logger = logging.getLogger(__name__)
 
@@ -86,14 +85,14 @@ class AdmissionController:
         config,
         tenant_registry: Optional[TenantRegistry] = None,
         rate_limiter: Optional[TenantRateLimiter] = None,
-        audit: Optional[AuditLogger] = None,
+        audit=None,
     ) -> None:
         self._redis = redis
         self._config = config
         self._quota = QuotaManager(redis) if QuotaManager else None
         self._tenant_registry = tenant_registry
         self._rate_limiter = rate_limiter
-        self._audit = audit
+        self._audit = audit  # AuditLogger | None
 
     async def initialise(self) -> None:
         """
@@ -126,9 +125,7 @@ class AdmissionController:
 
         return True, None
 
-    async def _tenant_rate_allowed(
-        self, tenant_id: str
-    ) -> tuple[bool, Optional[str]]:
+    async def _tenant_rate_allowed(self, tenant_id: str) -> tuple[bool, Optional[str]]:
         """
         Returns (allowed, reason).
         """
@@ -175,15 +172,18 @@ class AdmissionController:
             RedisTTL.RUN_META,
         )
 
-        if self._audit:
-            self._audit.run_rejected(run_id, request.tenant_id, reason)
-
         logger.info(
             "Run rejected: run=%s tenant=%s reason=%s",
             run_id,
             request.tenant_id,
             reason,
         )
+        if self._audit:
+            await self._audit.rejected(
+                run_id=run_id,
+                tenant_id=request.tenant_id,
+                reason=reason,
+            )
 
     async def admit(self, request) -> str:
         """
@@ -225,9 +225,7 @@ class AdmissionController:
                         raise AdmissionError(str(exc)) from exc
 
                 # Gate 3: tenant inflight limit
-                allowed, reason = await self._tenant_inflight_allowed(
-                    request.tenant_id
-                )
+                allowed, reason = await self._tenant_inflight_allowed(request.tenant_id)
                 if not allowed:
                     await self._reject_run(request, reason or "tenant_rejected")
                     raise QuotaExceededError(
@@ -284,13 +282,6 @@ class AdmissionController:
                     await self._tenant_registry.increment_inflight(request.tenant_id)
                     incremented_tenant_inflight = True
 
-                if self._audit:
-                    self._audit.run_admitted(
-                        run_id=request.run_id,
-                        tenant_id=request.tenant_id,
-                        metadata={"agent_type": request.agent_type},
-                    )
-
                 evt = RunAdmittedEvent(
                     run_id=request.run_id,
                     tenant_id=request.tenant_id,
@@ -333,6 +324,16 @@ class AdmissionController:
                     request.agent_type,
                     request.priority,
                 )
+                if self._audit:
+                    await self._audit.admitted(
+                        run_id=request.run_id,
+                        tenant_id=request.tenant_id,
+                        agent_type=request.agent_type,
+                        priority=request.priority,
+                        estimated_cost_cents=int(
+                            getattr(request, "estimated_cost_cents", 0) or 0
+                        ),
+                    )
                 _set_attr(sp, "hfa.admitted", "true")
                 return request.run_id
 

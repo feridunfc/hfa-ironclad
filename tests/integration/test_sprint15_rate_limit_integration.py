@@ -8,7 +8,6 @@ They are the authoritative tests for rate-limit atomicity guarantees.
 
 from __future__ import annotations
 
-import asyncio
 import pytest
 
 from hfa_control.rate_limit import TenantRateLimiter
@@ -119,7 +118,9 @@ async def test_lua_path_leaves_correct_zset_cardinality(real_redis):
     limit = 3
 
     for i in range(limit):
-        await limiter.check_and_consume("tenant-i", max_runs_per_second=limit, now=1000.0 + i * 0.01)
+        await limiter.check_and_consume(
+            "tenant-i", max_runs_per_second=limit, now=1000.0 + i * 0.01
+        )
 
     key = RedisKey.tenant_rate("tenant-i")
     count = await real_redis.zcard(key)

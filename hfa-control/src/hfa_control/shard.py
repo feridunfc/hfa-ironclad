@@ -30,7 +30,7 @@ from hfa_control.exceptions import ShardOwnershipError
 
 logger = logging.getLogger(__name__)
 
-OWNER_TTL = 60       # seconds; worker must publish heartbeat to renew
+OWNER_TTL = 60  # seconds; worker must publish heartbeat to renew
 MONITOR_INTERVAL = 15  # seconds
 
 

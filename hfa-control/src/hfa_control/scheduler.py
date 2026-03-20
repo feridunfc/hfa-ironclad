@@ -56,6 +56,7 @@ from hfa_control.registry import WorkerRegistry
 from hfa_control.shard import ShardOwnershipManager
 from hfa_control.tenant_fairness import TenantFairnessTracker
 from hfa_control.tenant_queue import TenantQueue
+from hfa_control.scheduler_lua import SchedulerLua
 
 try:
     from hfa.obs.runtime_metrics import IRONCLADMetrics as _M
@@ -98,12 +99,17 @@ class Scheduler:
         # Sprint 16: per-tenant queue (only used when fair_scheduling=True)
         self._tenant_queue = TenantQueue(redis)
 
+        # Sprint 18: Lua atomic operations for enqueue + dispatch commit
+        self._lua = SchedulerLua(redis)
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
         await self._ensure_group()
+        # Sprint 18: pre-load Lua scripts (EVALSHA ready before first dispatch)
+        await self._lua.initialise()
         loop = asyncio.get_running_loop()
         self._task = loop.create_task(
             self._consume_admitted(), name="scheduler.consume"
@@ -162,7 +168,9 @@ class Scheduler:
                                 # Direct mode: schedule immediately (Sprint 10 behavior)
                                 await self._schedule(evt)
 
-                        await self._redis.xack(self._config.control_stream, _GROUP, msg_id)
+                        await self._redis.xack(
+                            self._config.control_stream, _GROUP, msg_id
+                        )
 
                 # Sprint 16: drain the fair queue after processing stream batch
                 if getattr(self._config, "fair_scheduling", False):
@@ -175,6 +183,16 @@ class Scheduler:
                 await asyncio.sleep(1.0)
 
     async def _autoclaim(self, consumer: str) -> None:
+        """
+        Reclaim idle PEL messages from crashed/slow scheduler instances.
+
+        Sprint 18.2 fix: In fair mode, recovered messages are RE-ENQUEUED
+        through the tenant fair queue instead of being directly scheduled.
+        This ensures EVERY admitted run goes through the fairness gate —
+        no bypass path exists.
+
+        In direct mode: previous behavior preserved (schedule immediately).
+        """
         try:
             result = await self._redis.xautoclaim(
                 self._config.control_stream,
@@ -192,7 +210,17 @@ class Scheduler:
 
                     if event_type == "RunAdmitted":
                         evt = RunAdmittedEvent.from_redis(data)
-                        await self._schedule(evt)
+                        if getattr(self._config, "fair_scheduling", False):
+                            # Sprint 18.2: re-enqueue through fair queue
+                            # (idempotent — NX guard prevents duplicate)
+                            await self._enqueue_admitted(evt)
+                            logger.debug(
+                                "Autoclaim: re-enqueued run=%s tenant=%s via fair queue",
+                                evt.run_id,
+                                evt.tenant_id,
+                            )
+                        else:
+                            await self._schedule(evt)
 
                     await self._redis.xack(self._config.control_stream, _GROUP, msg_id)
         except Exception as exc:
@@ -204,45 +232,50 @@ class Scheduler:
 
     async def _enqueue_admitted(self, event: RunAdmittedEvent) -> None:
         """
-        Enqueue a newly admitted run into the per-tenant queue.
-        Called only when fair_scheduling=True.
+        Sprint 18.1: Atomically enqueue a run into the per-tenant fair queue.
+
+        All writes (ZADD queue, HSET meta, SET state, SADD active-index) happen
+        in a single Lua transaction. No ghost runs from partial writes.
+        Idempotent — re-enqueuing the same run_id is a no-op (NX guard).
         """
-        await self._tenant_queue.enqueue(
-            tenant_id=event.tenant_id,
+        from hfa_control.tenant_queue import MAX_PRIORITY
+
+        priority = max(1, min(int(event.priority), MAX_PRIORITY))
+        admitted_at = getattr(event, "admitted_at", None) or time.time()
+        ts_micros = int(admitted_at * 1_000_000) % int(1e12)
+        score = float((MAX_PRIORITY - priority) * int(1e12) + ts_micros)
+
+        newly_added = await self._lua.enqueue_admitted(
             run_id=event.run_id,
-            priority=event.priority,
+            tenant_id=event.tenant_id,
+            agent_type=event.agent_type,
+            priority=priority,
+            preferred_region=event.preferred_region or "",
+            preferred_placement=event.preferred_placement or "LEAST_LOADED",
+            admitted_at=admitted_at,
+            score=score,
         )
-        # Store the full event payload so we can reconstruct it at dispatch time
-        await self._redis.hset(
-            RedisKey.run_meta(event.run_id),
-            mapping={
-                "run_id": event.run_id,
-                "tenant_id": event.tenant_id,
-                "agent_type": event.agent_type,
-                "priority": str(event.priority),
-                "preferred_region": event.preferred_region or "",
-                "preferred_placement": event.preferred_placement or "LEAST_LOADED",
-                "admitted_at": str(time.time()),
-                "queue_state": "queued",
-            },
-        )
-        await self._redis.expire(RedisKey.run_meta(event.run_id), RedisTTL.RUN_META)
-        logger.debug(
-            "Fair enqueue: run=%s tenant=%s priority=%d",
-            event.run_id, event.tenant_id, event.priority,
-        )
+
+        if newly_added:
+            logger.debug(
+                "Fair enqueue [atomic]: run=%s tenant=%s priority=%d score=%.0f",
+                event.run_id,
+                event.tenant_id,
+                priority,
+                score,
+            )
+        else:
+            logger.debug(
+                "Fair enqueue [idempotent skip]: run=%s already queued",
+                event.run_id,
+            )
 
     async def _dispatch_fair_batch(self, max_dispatches: int = 20) -> None:
         """
-        Sprint 16 fair dispatch loop.
+        Sprint 16/18 fair dispatch loop.
 
-        Algorithm (CFS-style):
-          1. Get all tenants with queued runs.
-          2. Pick the most under-served tenant (lowest vruntime).
-          3. Dequeue its highest-priority run.
-          4. Place it via _schedule_from_meta().
-          5. Update vruntime on success.
-          6. Repeat until no more queued runs or max_dispatches reached.
+        Sprint 18.3 fix: missing/corrupt meta is quarantined, never silently dropped.
+        Sprint 18.5: dispatch commit is atomic via SchedulerLua.dispatch_commit().
         """
         dispatched = 0
         while dispatched < max_dispatches:
@@ -250,22 +283,33 @@ class Scheduler:
             if not active_tenants:
                 break
 
-            # CFS pick: tenant with lowest vruntime
             chosen_tenant = self._tenant_fairness.pick_next(active_tenants)
-
-            # Dequeue highest-priority run for this tenant
             run_id = await self._tenant_queue.dequeue(chosen_tenant)
             if run_id is None:
-                # Queue was empty (race between active_tenants read and dequeue)
                 continue
 
-            # Reconstruct event from stored meta
             event = await self._rebuild_event_from_meta(run_id)
             if event is None:
-                logger.warning("Fair dispatch: meta missing for run=%s — skipping", run_id)
+                # Sprint 18.3: quarantine — never silently drop a dequeued run
+                logger.error(
+                    "Fair dispatch: meta MISSING for run=%s (tenant=%s) — "
+                    "quarantining as failed to prevent ghost run",
+                    run_id,
+                    chosen_tenant,
+                )
+                if _M:
+                    try:
+                        _M.scheduling_failures_total.inc()
+                    except Exception:
+                        pass
+                try:
+                    await self._redis.set(
+                        RedisKey.run_state(run_id), "failed", ex=RedisTTL.RUN_STATE
+                    )
+                except Exception:
+                    pass
                 continue
 
-            # Place the run
             await self._schedule(event)
             dispatched += 1
 
@@ -311,31 +355,27 @@ class Scheduler:
                 shard = await self._shards.shard_for_group(worker_group, event.run_id)
                 stream = RedisKey.stream_shard(shard)
 
-                await self._redis.hset(
-                    RedisKey.run_meta(event.run_id),
-                    mapping={
-                        "run_id": event.run_id,
-                        "tenant_id": event.tenant_id,
-                        "agent_type": event.agent_type,
-                        "worker_group": worker_group,
-                        "shard": str(shard),
-                        "reschedule_count": "0",
-                        "admitted_at": str(event.admitted_at),
-                    },
+                # Sprint 18.5: atomic dispatch commit
+                # Precondition: run_state must be "admitted" or "queued"
+                # Transitions state → "scheduled", updates meta, adds to running ZSET
+                committed = await self._lua.dispatch_commit(
+                    run_id=event.run_id,
+                    tenant_id=event.tenant_id,
+                    agent_type=event.agent_type,
+                    worker_group=worker_group,
+                    shard=shard,
+                    reschedule_count=0,
+                    admitted_at=getattr(event, "admitted_at", time.time())
+                    or time.time(),
+                    running_zset=self._config.running_zset,
                 )
-                await self._redis.expire(
-                    RedisKey.run_meta(event.run_id), RedisTTL.RUN_META
-                )
-                await self._redis.set(
-                    RedisKey.run_state(event.run_id),
-                    "scheduled",
-                    ex=RedisTTL.RUN_STATE,
-                )
-
-                await self._redis.zadd(
-                    self._config.running_zset,
-                    {event.run_id: time.time()},
-                )
+                if not committed:
+                    logger.warning(
+                        "Dispatch commit rejected for run=%s — already scheduled "
+                        "or in terminal state (double-dispatch prevented)",
+                        event.run_id,
+                    )
+                    return
 
                 sched_evt = RunScheduledEvent(
                     run_id=event.run_id,
