@@ -127,3 +127,22 @@ class ControlPlaneConfig:
     autoclaim_count: int = 10
     # Sprint 16: enable tenant-aware fair scheduling queue
     fair_scheduling: bool = False
+    # Sprint 19 scheduler loop
+    scheduler_loop_max_dispatches: int = 32
+    scheduler_loop_max_duration_ms: int = 100
+    scheduler_loop_max_failures: int = 8
+    scheduler_loop_idle_sleep_ms: int = 250
+    scheduler_loop_error_sleep_ms: int = 1000
+
+    # Sprint 19 dispatch pacing
+    dispatch_tokens_capacity: int = 128
+    dispatch_tokens_refill_per_sec: float = 32.0
+    dispatch_degraded_refill_per_sec: float = 4.0
+    dispatch_aimd_enabled: bool = True
+
+    # Sprint 19 worker scoring
+    worker_score_latency_weight: float = 1.0
+    worker_score_failure_weight: float = 2.0
+    worker_score_saturation_weight: float = 1.5
+    worker_score_affinity_bonus: float = 0.5
+    worker_score_capability_bonus: float = 0.75

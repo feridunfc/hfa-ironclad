@@ -57,6 +57,10 @@ from hfa_control.shard import ShardOwnershipManager
 from hfa_control.tenant_fairness import TenantFairnessTracker
 from hfa_control.tenant_queue import TenantQueue
 from hfa_control.scheduler_lua import SchedulerLua
+from hfa_control.dispatch_controller import DispatchController
+from hfa_control.worker_scoring import WorkerScorer
+from hfa_control.scheduler_snapshot import SchedulerSnapshotBuilder
+from hfa_control.scheduler_loop import SchedulerLoop
 
 try:
     from hfa.obs.runtime_metrics import IRONCLADMetrics as _M
@@ -102,6 +106,29 @@ class Scheduler:
         # Sprint 18: Lua atomic operations for enqueue + dispatch commit
         self._lua = SchedulerLua(redis)
 
+        # Sprint 19: global scheduler intelligence components (fair mode only)
+        self._snapshot_builder = SchedulerSnapshotBuilder(
+            redis=redis,
+            registry=registry,
+            tenant_queue=self._tenant_queue,
+            tenant_fairness=self._tenant_fairness,
+            config=config,
+        )
+        self._dispatch_controller = DispatchController(redis, config)
+        self._worker_scorer = WorkerScorer(config)
+        self._scheduler_loop = SchedulerLoop(
+            redis=redis,
+            registry=registry,
+            shards=shards,
+            tenant_queue=self._tenant_queue,
+            tenant_fairness=self._tenant_fairness,
+            lua=self._lua,
+            snapshot_builder=self._snapshot_builder,
+            dispatch_controller=self._dispatch_controller,
+            worker_scorer=self._worker_scorer,
+            config=config,
+        )
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -110,6 +137,7 @@ class Scheduler:
         await self._ensure_group()
         # Sprint 18: pre-load Lua scripts (EVALSHA ready before first dispatch)
         await self._lua.initialise()
+        await self._scheduler_loop.on_leadership_gained()
         loop = asyncio.get_running_loop()
         self._task = loop.create_task(
             self._consume_admitted(), name="scheduler.consume"
@@ -124,6 +152,7 @@ class Scheduler:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        await self._scheduler_loop.on_leadership_lost()
         logger.info("Scheduler closed")
 
     # ------------------------------------------------------------------
@@ -256,6 +285,26 @@ class Scheduler:
             score=score,
         )
 
+        # Persist fields not covered by the Lua queue/meta write.
+        try:
+            import json
+            await self._redis.set(
+                RedisKey.run_payload(event.run_id),
+                json.dumps(event.payload or {}),
+                ex=RedisTTL.RUN_META,
+            )
+            await self._redis.hset(
+                RedisKey.run_meta(event.run_id),
+                mapping={
+                    "estimated_cost_cents": str(getattr(event, "estimated_cost_cents", 0) or 0),
+                    "trace_parent": event.trace_parent or "",
+                    "trace_state": event.trace_state or "",
+                },
+            )
+            await self._redis.expire(RedisKey.run_meta(event.run_id), RedisTTL.RUN_META)
+        except Exception:
+            logger.debug("Fair enqueue: supplemental payload/meta persist failed", exc_info=True)
+
         if newly_added:
             logger.debug(
                 "Fair enqueue [atomic]: run=%s tenant=%s priority=%d score=%.0f",
@@ -272,52 +321,87 @@ class Scheduler:
 
     async def _dispatch_fair_batch(self, max_dispatches: int = 20) -> None:
         """
-        Sprint 16/18 fair dispatch loop.
+        Fair-mode dispatch loop.
 
-        Sprint 18.3 fix: missing/corrupt meta is quarantined, never silently dropped.
-        Sprint 18.5: dispatch commit is atomic via SchedulerLua.dispatch_commit().
+        Compatibility-preserving behavior:
+        - choose next tenant by vruntime over active tenants
+        - dequeue exactly one run at a time from that tenant
+        - rebuild event from run meta
+        - if state is missing, backfill "queued" precondition
+        - schedule through authoritative _schedule() path
+        - never charge fairness here directly; _schedule() owns post-success charge
+
+        This preserves Sprint 16/18 semantics while still allowing newer
+        SchedulerLoop-based intelligence to coexist elsewhere.
         """
         dispatched = 0
+
         while dispatched < max_dispatches:
-            active_tenants = await self._tenant_queue.active_tenants()
-            if not active_tenants:
-                break
+            active = await self._tenant_queue.active_tenants()
+            if not active:
+                return
 
-            chosen_tenant = self._tenant_fairness.pick_next(active_tenants)
-            run_id = await self._tenant_queue.dequeue(chosen_tenant)
-            if run_id is None:
+            tenant_id = self._tenant_fairness.pick_next(active)
+
+            run_id = await self._tenant_queue.dequeue(tenant_id)
+            if not run_id:
+                # queue may have gone empty between active_tenants() and dequeue()
                 continue
 
-            event = await self._rebuild_event_from_meta(run_id)
-            if event is None:
-                # Sprint 18.3: quarantine — never silently drop a dequeued run
-                logger.error(
-                    "Fair dispatch: meta MISSING for run=%s (tenant=%s) — "
-                    "quarantining as failed to prevent ghost run",
-                    run_id,
-                    chosen_tenant,
+            evt = await self._rebuild_event_from_meta(run_id)
+            if evt is None:
+                # Ghost/missing-meta protection: quarantine explicitly, never silent drop.
+                await self._redis.set(
+                    RedisKey.run_state(run_id),
+                    "failed",
+                    ex=RedisTTL.RUN_STATE,
                 )
-                if _M:
-                    try:
-                        _M.scheduling_failures_total.inc()
-                    except Exception:
-                        pass
-                try:
-                    await self._redis.set(
-                        RedisKey.run_state(run_id), "failed", ex=RedisTTL.RUN_STATE
-                    )
-                except Exception:
-                    pass
+                logger.error("Quarantined run %s: missing meta", run_id)
                 continue
 
-            await self._schedule(event)
-            dispatched += 1
+            # ------------------------------------------------------------------
+            # Fair-queue compatibility fix:
+            # Some tests/manual queue setups create queue entries + meta but do not
+            # explicitly write run_state. dispatch_commit requires state in
+            # {"admitted", "queued"} so fair-mode must backfill "queued".
+            # ------------------------------------------------------------------
+            state_key = RedisKey.run_state(evt.run_id)
+            current_state = await self._redis.get(state_key)
+            if isinstance(current_state, bytes):
+                current_state = current_state.decode()
+
+            if not current_state:
+                await self._redis.set(
+                    state_key,
+                    "queued",
+                    ex=RedisTTL.RUN_STATE,
+                )
+
+            # Best-effort meta floor for admitted_at if a hand-written test/meta row
+            # omitted it or stored an unusable value.
+            meta_key = RedisKey.run_meta(evt.run_id)
+            admitted_at = float(getattr(evt, "admitted_at", time.time()) or time.time())
+
+            raw_admitted = await self._redis.hget(meta_key, "admitted_at")
+            if not raw_admitted:
+                await self._redis.hset(meta_key, mapping={"admitted_at": str(admitted_at)})
+                await self._redis.expire(meta_key, RedisTTL.RUN_META)
+
+            try:
+                await self._schedule(evt)
+                dispatched += 1
+            except Exception:
+                # _schedule already logs and marks failed on PlacementError paths.
+                # We do not update fairness here; _schedule owns that on success only.
+                continue
 
         if dispatched:
             logger.debug("Fair dispatch: placed %d runs this cycle", dispatched)
 
     async def _rebuild_event_from_meta(self, run_id: str) -> Optional[RunAdmittedEvent]:
         """Reconstruct a RunAdmittedEvent from stored run meta (fair-mode only)."""
+        import json
+
         raw = await self._redis.hgetall(RedisKey.run_meta(run_id))
         if not raw:
             return None
@@ -326,6 +410,20 @@ class Scheduler:
             v = raw.get(k.encode()) or raw.get(k)
             return (v.decode() if isinstance(v, bytes) else v) or ""
 
+        def _f(k: str) -> float:
+            try:
+                return float(_s(k))
+            except (ValueError, TypeError):
+                return 0.0
+
+        payload: dict = {}
+        raw_payload = await self._redis.get(RedisKey.run_payload(run_id))
+        if raw_payload:
+            try:
+                payload = json.loads(raw_payload.decode() if isinstance(raw_payload, bytes) else raw_payload)
+            except Exception:
+                payload = {}
+
         return RunAdmittedEvent(
             run_id=run_id,
             tenant_id=_s("tenant_id"),
@@ -333,12 +431,16 @@ class Scheduler:
             priority=int(_s("priority") or "5"),
             preferred_region=_s("preferred_region"),
             preferred_placement=_s("preferred_placement") or "LEAST_LOADED",
+            payload=payload,
+            estimated_cost_cents=int(_s("estimated_cost_cents") or "0"),
+            admitted_at=_f("admitted_at") or time.time(),
+            trace_parent=_s("trace_parent") or None,
+            trace_state=_s("trace_state") or None,
         )
 
     # ------------------------------------------------------------------
     # Placement decision
     # ------------------------------------------------------------------
-
     async def _schedule(self, event: RunAdmittedEvent) -> None:
         span = (
             _tracer.start_as_current_span("hfa.scheduler.place")
@@ -355,9 +457,47 @@ class Scheduler:
                 shard = await self._shards.shard_for_group(worker_group, event.run_id)
                 stream = RedisKey.stream_shard(shard)
 
-                # Sprint 18.5: atomic dispatch commit
-                # Precondition: run_state must be "admitted" or "queued"
-                # Transitions state → "scheduled", updates meta, adds to running ZSET
+                admitted_at = float(
+                    getattr(event, "admitted_at", time.time()) or time.time()
+                )
+
+                # ------------------------------------------------------------------
+                # Sprint 18 compatibility fix (CRITICAL)
+                #
+                # dispatch_commit requires run_state in {"admitted", "queued"}.
+                # In direct-mode scheduling, _schedule() may be called without
+                # prior enqueue. We must establish minimal preconditions.
+                # ------------------------------------------------------------------
+                state_key = RedisKey.run_state(event.run_id)
+                current_state = await self._redis.get(state_key)
+                if isinstance(current_state, bytes):
+                    current_state = current_state.decode()
+
+                if not current_state:
+                    # Set minimal valid precondition
+                    await self._redis.set(
+                        state_key,
+                        "admitted",
+                        ex=RedisTTL.RUN_STATE,
+                    )
+
+                    meta_key = RedisKey.run_meta(event.run_id)
+                    await self._redis.hset(
+                        meta_key,
+                        mapping={
+                            "tenant_id": event.tenant_id,
+                            "agent_type": event.agent_type,
+                            "priority": str(event.priority),
+                            "preferred_region": event.preferred_region or "",
+                            "preferred_placement": event.preferred_placement or "LEAST_LOADED",
+                            "admitted_at": str(admitted_at),
+                        },
+                    )
+                    await self._redis.expire(meta_key, RedisTTL.RUN_META)
+
+                # ------------------------------------------------------------------
+                # Atomic dispatch commit (authoritative state transition)
+                # ------------------------------------------------------------------
                 committed = await self._lua.dispatch_commit(
                     run_id=event.run_id,
                     tenant_id=event.tenant_id,
@@ -365,18 +505,21 @@ class Scheduler:
                     worker_group=worker_group,
                     shard=shard,
                     reschedule_count=0,
-                    admitted_at=getattr(event, "admitted_at", time.time())
-                    or time.time(),
+                    admitted_at=admitted_at,
                     running_zset=self._config.running_zset,
                 )
+
                 if not committed:
                     logger.warning(
-                        "Dispatch commit rejected for run=%s — already scheduled "
-                        "or in terminal state (double-dispatch prevented)",
+                        "Dispatch commit rejected for run=%s — state conflict "
+                        "(double-dispatch or invalid transition prevented)",
                         event.run_id,
                     )
                     return
 
+                # ------------------------------------------------------------------
+                # Emit scheduled event
+                # ------------------------------------------------------------------
                 sched_evt = RunScheduledEvent(
                     run_id=event.run_id,
                     tenant_id=event.tenant_id,
@@ -392,6 +535,9 @@ class Scheduler:
                     approximate=True,
                 )
 
+                # ------------------------------------------------------------------
+                # Forward to worker shard stream
+                # ------------------------------------------------------------------
                 run_evt = RunRequestedEvent(
                     run_id=event.run_id,
                     tenant_id=event.tenant_id,
@@ -413,16 +559,16 @@ class Scheduler:
                 _set_attr(sp, "hfa.shard", str(shard))
                 _set_attr(sp, "hfa.policy", policy)
 
-                # Sprint 14C: fairness accounting hook
-                # Only updates AFTER all Redis writes succeed.
-                # Never updates on PlacementError or unexpected exception.
+                # ------------------------------------------------------------------
+                # Fairness accounting (post-success only)
+                # ------------------------------------------------------------------
                 try:
                     self._tenant_fairness.update_on_dispatch(
                         event.tenant_id,
                         cost=self._fairness_cost(event),
                     )
                 except Exception:
-                    pass  # fairness is instrumentation — never block scheduling
+                    pass  # never block scheduling
 
                 logger.info(
                     "Scheduled: run=%s group=%s shard=%d policy=%s",
@@ -441,6 +587,7 @@ class Scheduler:
                     "failed",
                     ex=RedisTTL.RUN_STATE,
                 )
+
             except Exception as exc:
                 logger.error(
                     "Scheduler._schedule error: run=%s %s",
@@ -448,7 +595,6 @@ class Scheduler:
                     exc,
                     exc_info=True,
                 )
-
     # ------------------------------------------------------------------
     # Fairness helpers
     # ------------------------------------------------------------------

@@ -75,8 +75,7 @@ local meta_ttl          = tonumber(ARGV[10])
 -- 1. Precondition: only proceed from "admitted" or "queued" state
 local current_state = redis.call('GET', state_key)
 if current_state == false then
-    -- Key expired or missing — treat as stale, reject
-    return 0
+    return {'state_conflict', 'missing_state'}
 end
 
 local cs = current_state
@@ -85,8 +84,10 @@ if type(cs) == 'userdata' then
 end
 
 if cs ~= 'admitted' and cs ~= 'queued' then
-    -- Already scheduled, running, done, failed, or rejected — reject dispatch
-    return 0
+    if cs == 'scheduled' or cs == 'running' then
+        return {'already_running', cs}
+    end
+    return {'illegal_transition', cs}
 end
 
 -- 2. Transition state to "scheduled"
@@ -109,4 +110,4 @@ redis.call('EXPIRE', meta_key, meta_ttl)
 -- 4. Add to running ZSET (score = scheduled_at timestamp)
 redis.call('ZADD', running_key, tonumber(scheduled_at), run_id)
 
-return 1
+return {'committed', run_id}
