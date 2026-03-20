@@ -51,6 +51,29 @@ def _lua_path(filename: str) -> Path:
     raise FileNotFoundError(f"{filename} not found in known lua directories")
 
 
+class DispatchCommitResult:
+    """Structured dispatch commit result with requeue semantics."""
+
+    SUCCESS = "committed"
+    STATE_CONFLICT = "state_conflict"
+    ALREADY_RUNNING = "already_running"
+    ILLEGAL_TRANSITION = "illegal_transition"
+    INTERNAL_ERROR = "internal_error"
+
+    def __init__(self, status: str, run_id: str, metadata: Optional[dict] = None) -> None:
+        self.status = status
+        self.run_id = run_id
+        self.metadata = metadata or {}
+
+    @property
+    def committed(self) -> bool:
+        return self.status == self.SUCCESS
+
+    @property
+    def should_requeue(self) -> bool:
+        return self.status in {self.INTERNAL_ERROR}
+
+
 class SchedulerLua:
     """
     Loads and executes scheduler Lua scripts via EVALSHA.
@@ -242,16 +265,32 @@ class SchedulerLua:
         admitted_at: float,
         running_zset: str,
     ) -> bool:
-        """
-        Atomically:
-          1. Check run_state is "admitted" or "queued" (precondition)
-          2. Transition run_state → "scheduled"
-          3. Update run_meta with placement decision
-          4. Add to running ZSET
+        result = await self.dispatch_commit_detailed(
+            run_id=run_id,
+            tenant_id=tenant_id,
+            agent_type=agent_type,
+            worker_group=worker_group,
+            shard=shard,
+            reschedule_count=reschedule_count,
+            admitted_at=admitted_at,
+            running_zset=running_zset,
+        )
+        return result.committed
 
-        Returns True if committed (proceed with XADD stream writes).
-        Returns False if precondition failed (double-dispatch or stale state).
-        Falls back to non-atomic writes if Lua not available.
+    async def dispatch_commit_detailed(
+        self,
+        *,
+        run_id: str,
+        tenant_id: str,
+        agent_type: str,
+        worker_group: str,
+        shard: int,
+        reschedule_count: int = 0,
+        admitted_at: float,
+        running_zset: str,
+    ) -> DispatchCommitResult:
+        """
+        Atomic dispatch commit with a structured status code.
         """
         state_key = RedisKey.run_state(run_id)
         meta_key = RedisKey.run_meta(run_id)
@@ -288,7 +327,19 @@ class SchedulerLua:
                         now,
                     ),
                 )
-                return bool(result)
+                if isinstance(result, DispatchCommitResult):
+                    return result
+                if isinstance(result, (list, tuple)) and result:
+                    status = result[0]
+                    if isinstance(status, bytes):
+                        status = status.decode()
+                    details = result[1] if len(result) > 1 else None
+                    if isinstance(details, bytes):
+                        details = details.decode()
+                    return DispatchCommitResult(str(status), run_id, {"details": details})
+                if bool(result):
+                    return DispatchCommitResult(DispatchCommitResult.SUCCESS, run_id)
+                return DispatchCommitResult(DispatchCommitResult.STATE_CONFLICT, run_id)
             except Exception as exc:
                 logger.warning(
                     "SchedulerLua.dispatch_commit Lua failed: %s — using fallback", exc
@@ -321,13 +372,14 @@ class SchedulerLua:
         reschedule_count: int,
         admitted_at: float,
         scheduled_at: float,
-    ) -> bool:
+    ) -> DispatchCommitResult:
         curr = await self._redis.get(state_key)
-        if curr and (curr.decode() if isinstance(curr, bytes) else curr) not in (
-            "admitted",
-            "queued",
-        ):
-            return False
+        curr_s = curr.decode() if isinstance(curr, bytes) else curr
+        if not curr_s:
+            return DispatchCommitResult(DispatchCommitResult.STATE_CONFLICT, run_id, {"details": "missing_state"})
+        if curr_s not in ("admitted", "queued"):
+            status = DispatchCommitResult.ALREADY_RUNNING if curr_s in ("scheduled", "running") else DispatchCommitResult.ILLEGAL_TRANSITION
+            return DispatchCommitResult(status, run_id, {"details": curr_s})
         pipe = self._redis.pipeline()
         pipe.set(state_key, "scheduled", ex=RedisTTL.RUN_STATE)
         pipe.hset(
@@ -347,4 +399,4 @@ class SchedulerLua:
         pipe.expire(meta_key, RedisTTL.RUN_META)
         pipe.zadd(running_zset, {run_id: scheduled_at})
         await pipe.execute()
-        return True
+        return DispatchCommitResult(DispatchCommitResult.SUCCESS, run_id)
