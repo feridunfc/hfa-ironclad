@@ -11,6 +11,3 @@ scripts/secrets/
 *.egg-info/
 .pytest_cache/
 sprint14a/
-
-*.pem
-secrets/

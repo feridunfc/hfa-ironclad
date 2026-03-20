@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock
 from hfa.events.schema import RunAdmittedEvent
 from hfa_control.scheduler import Scheduler
 from hfa_control.models import ControlPlaneConfig, WorkerProfile, WorkerStatus
+from hfa_control.tenant_queue import TenantQueue
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +91,7 @@ async def test_direct_mode_schedule_still_works():
     evt = _event(run_id="run-direct-001")
     await sched._schedule(evt)
 
-    state = await redis.get("hfa:run:state:run-direct-001")
+    state = await redis.get(f"hfa:run:state:run-direct-001")
     s = state.decode() if isinstance(state, bytes) else state
     assert s == "scheduled"
 
@@ -232,19 +233,8 @@ async def test_two_tenants_get_equal_share():
 
     await sched._dispatch_fair_batch(max_dispatches=6)
 
-    scheduled_a = 0
-    for i in range(6):
-        raw = await redis.get(f"hfa:run:state:run-a-{i}")
-        state = (raw.decode() if isinstance(raw, bytes) else raw) or ""
-        if state == "scheduled":
-            scheduled_a += 1
-
-    scheduled_b = 0
-    for i in range(6):
-        raw = await redis.get(f"hfa:run:state:run-b-{i}")
-        state = (raw.decode() if isinstance(raw, bytes) else raw) or ""
-        if state == "scheduled":
-            scheduled_b += 1
+    scheduled_a = sum([1 for i in range(6) if (await redis.get(f"hfa:run:state:run-a-{i}") or b"").decode() == "scheduled"])
+    scheduled_b = sum([1 for i in range(6) if (await redis.get(f"hfa:run:state:run-b-{i}") or b"").decode() == "scheduled"])
 
     assert abs(scheduled_a - scheduled_b) <= 1, (
         f"Unfair dispatch: alpha={scheduled_a} beta={scheduled_b}"

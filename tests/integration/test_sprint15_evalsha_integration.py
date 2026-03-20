@@ -16,7 +16,7 @@ import pytest
 from pathlib import Path
 
 from hfa_control.rate_limit import TenantRateLimiter
-from hfa.lua.loader import LuaScriptLoader
+# from hfa.lua.loader import LuaScriptLoader
 from hfa.config.keys import RedisKey
 
 

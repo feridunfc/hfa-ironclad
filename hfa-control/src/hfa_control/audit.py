@@ -1,124 +1,305 @@
 """
 hfa-control/src/hfa_control/audit.py
-IRONCLAD Sprint 17.2 --- Audit logging for control plane
+IRONCLAD Sprint 17 — Audit logger (control-plane event sink)
+
+Design
+------
+AuditLogger is a thin async wrapper around SignedLedger that emits
+tamper-evident audit entries for critical control-plane operations:
+
+  ADMITTED       — run accepted through admission gates
+  REJECTED       — run rejected (reason included)
+  SCHEDULED      — run placed on worker
+  DRAIN_STARTED  — operator initiated worker drain
+  DLQ_REPLAY     — operator replayed a dead-lettered run
+  DLQ_DELETED    — operator deleted a DLQ entry
+  RESCHEDULE     — operator forced reschedule
+
+Every entry is Ed25519-signed. The chain is append-only and tamper-evident:
+any modification to a historical entry breaks the signature of all subsequent
+entries.
+
+Fallback behavior
+-----------------
+If the ledger key is not configured (HFA_LEDGER_KEY_ID env not set), audit
+logging silently no-ops. This preserves backward compatibility for environments
+that have not yet set up key management.
+
+Failure mode
+------------
+Audit failures are logged as ERROR but never propagate to callers.
+Audit must not break the critical path (admission / scheduling).
+
+Usage
+-----
+    audit = AuditLogger(redis, key_provider)
+    await audit.initialise()
+
+    await audit.admitted(run_id="r", tenant_id="t", agent_type="coder")
+    await audit.rejected(run_id="r", tenant_id="t", reason="quota_exceeded")
+
+IRONCLAD rules
+--------------
+* No print() — logging only.
+* Never raise from public methods — log and continue.
+* cost_cents: int — no float USD.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Protocol
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+# ---------------------------------------------------------------------------
+# Audit event types
+# ---------------------------------------------------------------------------
+
+
 class AuditEvent:
-    """Base audit event structure."""
+    ADMITTED       = "ADMITTED"
+    REJECTED       = "REJECTED"
+    SCHEDULED      = "SCHEDULED"
+    DRAIN_STARTED  = "DRAIN_STARTED"
+    DLQ_REPLAY     = "DLQ_REPLAY"
+    DLQ_DELETED    = "DLQ_DELETED"
+    RESCHEDULE     = "RESCHEDULE"
+    AUTH_FAILURE   = "AUTH_FAILURE"
 
-    event_type: str
-    timestamp: float
-    tenant_id: Optional[str] = None
-    run_id: Optional[str] = None
-    worker_id: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
 
-
-class AuditStore(Protocol):
-    async def append(self, event: AuditEvent) -> None: ...
+# ---------------------------------------------------------------------------
+# AuditLogger
+# ---------------------------------------------------------------------------
 
 
 class AuditLogger:
     """
-    Central audit logger for control plane operations.
-    Fail-silent: audit must never block critical paths.
+    Async audit logger backed by SignedLedger.
+
+    Args:
+        redis:        aioredis.Redis client (for RedisLedgerStore).
+        key_provider: Ed25519KeyProvider instance. If None, audit is disabled.
     """
 
-    def __init__(self, store: AuditStore, component: str = "control-plane") -> None:
-        self._store = store
-        self._component = component
-        self._queue: asyncio.Queue[AuditEvent] = asyncio.Queue(maxsize=1000)
-        self._worker_task: Optional[asyncio.Task] = None
-        self._running = False
+    def __init__(self, redis=None, key_provider=None) -> None:
+        self._redis = redis
+        self._key_provider = key_provider
+        self._ledger = None
+        self._enabled = key_provider is not None
 
-    async def start(self) -> None:
-        if self._worker_task is not None:
+    async def initialise(self) -> None:
+        """
+        Set up the SignedLedger with a Redis-backed store.
+        Silently disables audit if key provider is missing.
+        """
+        if not self._enabled:
+            logger.info("AuditLogger: disabled (no key provider configured)")
             return
-        self._running = True
-        self._worker_task = asyncio.create_task(self._worker_loop(), name="audit.worker")
-        logger.info("AuditLogger started: component=%s", self._component)
 
-    async def close(self) -> None:
-        self._running = False
-        if self._worker_task and not self._worker_task.done():
-            try:
-                await asyncio.wait_for(self._worker_task, timeout=2.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                self._worker_task.cancel()
-                try:
-                    await self._worker_task
-                except asyncio.CancelledError:
-                    pass
-        await self._flush_queue()
-        self._worker_task = None
-        logger.info("AuditLogger closed")
-
-    async def _worker_loop(self) -> None:
-        while self._running:
-            try:
-                event = await asyncio.wait_for(self._queue.get(), timeout=0.2)
-            except asyncio.TimeoutError:
-                continue
-            except asyncio.CancelledError:
-                break
-
-            try:
-                await self._write_event(event)
-            except Exception as exc:  # pragma: no cover
-                logger.error("Audit worker error: %s", exc, exc_info=True)
-
-    async def _flush_queue(self) -> None:
-        while not self._queue.empty():
-            try:
-                event = self._queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            try:
-                await self._write_event(event)
-            except Exception as exc:  # pragma: no cover
-                logger.error("Audit flush error: %s", exc, exc_info=True)
-
-    async def _write_event(self, event: AuditEvent) -> None:
         try:
-            await self._store.append(event)
+            from hfa.governance.signed_ledger_v1 import SignedLedger
+            from hfa_control.audit_store import RedisLedgerStore
+
+            store = RedisLedgerStore(self._redis)
+            self._ledger = SignedLedger(
+                key_provider=self._key_provider,
+                store=store,
+            )
+            logger.info(
+                "AuditLogger: initialised (key_id=%s)",
+                self._key_provider.key_id,
+            )
         except Exception as exc:
-            logger.error("Failed to write audit event: %s", exc, exc_info=True)
+            logger.error("AuditLogger.initialise failed: %s", exc, exc_info=True)
+            self._enabled = False
 
-    def _enqueue(self, event: AuditEvent) -> None:
+    # ------------------------------------------------------------------
+    # Public audit methods
+    # ------------------------------------------------------------------
+
+    async def admitted(
+        self,
+        run_id: str,
+        tenant_id: str,
+        agent_type: str,
+        priority: int = 5,
+        estimated_cost_cents: int = 0,
+    ) -> None:
+        await self._emit(
+            event_type=AuditEvent.ADMITTED,
+            run_id=run_id,
+            tenant_id=tenant_id,
+            data={
+                "agent_type": agent_type,
+                "priority": priority,
+                "estimated_cost_cents": estimated_cost_cents,
+            },
+        )
+
+    async def rejected(
+        self,
+        run_id: str,
+        tenant_id: str,
+        reason: str,
+    ) -> None:
+        await self._emit(
+            event_type=AuditEvent.REJECTED,
+            run_id=run_id,
+            tenant_id=tenant_id,
+            data={"reason": reason},
+        )
+
+    async def scheduled(
+        self,
+        run_id: str,
+        tenant_id: str,
+        worker_group: str,
+        shard: int,
+        policy: str,
+    ) -> None:
+        await self._emit(
+            event_type=AuditEvent.SCHEDULED,
+            run_id=run_id,
+            tenant_id=tenant_id,
+            data={
+                "worker_group": worker_group,
+                "shard": shard,
+                "policy": policy,
+            },
+        )
+
+    async def drain_started(
+        self,
+        worker_id: str,
+        operator: str = "system",
+        reason: str = "",
+    ) -> None:
+        await self._emit(
+            event_type=AuditEvent.DRAIN_STARTED,
+            run_id=worker_id,   # reuse run_id field for worker_id
+            tenant_id="__operator__",
+            data={
+                "worker_id": worker_id,
+                "operator": operator,
+                "reason": reason,
+            },
+        )
+
+    async def dlq_replay(
+        self,
+        run_id: str,
+        tenant_id: str,
+        operator: str = "system",
+    ) -> None:
+        await self._emit(
+            event_type=AuditEvent.DLQ_REPLAY,
+            run_id=run_id,
+            tenant_id=tenant_id,
+            data={"operator": operator},
+        )
+
+    async def dlq_deleted(
+        self,
+        run_id: str,
+        tenant_id: str,
+        operator: str = "system",
+    ) -> None:
+        await self._emit(
+            event_type=AuditEvent.DLQ_DELETED,
+            run_id=run_id,
+            tenant_id=tenant_id,
+            data={"operator": operator},
+        )
+
+    async def reschedule(
+        self,
+        run_id: str,
+        tenant_id: str,
+        operator: str = "system",
+    ) -> None:
+        await self._emit(
+            event_type=AuditEvent.RESCHEDULE,
+            run_id=run_id,
+            tenant_id=tenant_id,
+            data={"operator": operator},
+        )
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    async def _emit(
+        self,
+        event_type: str,
+        run_id: str,
+        tenant_id: str,
+        data: dict[str, Any],
+    ) -> None:
+        """
+        Append a signed audit entry. Never raises — logs errors and continues.
+        """
+        if not self._enabled or self._ledger is None:
+            return
+
+        payload: dict[str, Any] = {
+            "event_type": event_type,
+            "run_id": run_id,
+            "tenant_id": tenant_id,
+            "ts": time.time(),
+            **data,
+        }
+
         try:
-            self._queue.put_nowait(event)
-        except asyncio.QueueFull:
-            logger.warning("Audit queue full, dropping event: %s", event.event_type)
+            await self._ledger.append(
+                tenant_id=tenant_id,
+                run_id=run_id,
+                event_type=event_type,
+                payload=payload,
+            )
+            logger.debug(
+                "Audit: %s run=%s tenant=%s",
+                event_type, run_id, tenant_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "AuditLogger._emit failed: event=%s run=%s %s",
+                event_type, run_id, exc,
+                exc_info=True,
+            )
+            # Never propagate — audit must not break the critical path
 
-    def run_admitted(self, run_id: str, tenant_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
-        self._enqueue(AuditEvent("run.admitted", time.time(), tenant_id=tenant_id, run_id=run_id, metadata=metadata or {}))
 
-    def run_rejected(self, run_id: str, tenant_id: str, reason: str) -> None:
-        self._enqueue(AuditEvent("run.rejected", time.time(), tenant_id=tenant_id, run_id=run_id, metadata={"reason": reason}))
+# ---------------------------------------------------------------------------
+# Singleton factory
+# ---------------------------------------------------------------------------
 
-    def run_scheduled(self, run_id: str, tenant_id: str, worker_group: str, shard: int) -> None:
-        self._enqueue(AuditEvent("run.scheduled", time.time(), tenant_id=tenant_id, run_id=run_id, metadata={"worker_group": worker_group, "shard": shard}))
 
-    def drain_started(self, worker_id: str, worker_group: str, reason: str) -> None:
-        self._enqueue(AuditEvent("worker.drain_started", time.time(), worker_id=worker_id, metadata={"worker_group": worker_group, "reason": reason}))
+def build_audit_logger(redis) -> AuditLogger:
+    """
+    Build an AuditLogger from environment variables.
 
-    def dlq_replay(self, run_id: str, tenant_id: str) -> None:
-        self._enqueue(AuditEvent("dlq.replay", time.time(), tenant_id=tenant_id, run_id=run_id))
+    Returns a no-op AuditLogger if HFA_LEDGER_KEY_ID is not set.
+    """
+    import os
+    key_id = os.environ.get("HFA_LEDGER_KEY_ID", "").strip()
 
-    def dlq_deleted(self, run_id: str, tenant_id: str) -> None:
-        self._enqueue(AuditEvent("dlq.deleted", time.time(), tenant_id=tenant_id, run_id=run_id))
+    if not key_id:
+        logger.info(
+            "AuditLogger: HFA_LEDGER_KEY_ID not set — audit logging disabled. "
+            "Set HFA_LEDGER_KEY_ID and HFA_LEDGER_PRIVATE_KEY_B64 to enable."
+        )
+        return AuditLogger()
 
-    def run_rescheduled(self, run_id: str, tenant_id: str, reason: str) -> None:
-        self._enqueue(AuditEvent("run.rescheduled", time.time(), tenant_id=tenant_id, run_id=run_id, metadata={"reason": reason}))
+    try:
+        from hfa.governance.signed_ledger_v1 import Ed25519EnvKeyProvider
+        provider = Ed25519EnvKeyProvider()
+        return AuditLogger(redis=redis, key_provider=provider)
+    except Exception as exc:
+        logger.error(
+            "AuditLogger: failed to load key provider: %s — audit disabled",
+            exc,
+        )
+        return AuditLogger()

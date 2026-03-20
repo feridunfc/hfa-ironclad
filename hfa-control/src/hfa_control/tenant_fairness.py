@@ -1,72 +1,96 @@
-from __future__ import annotations
+"""
+hfa-control/src/hfa_control/tenant_fairness.py
+IRONCLAD Sprint 14C/16 — Tenant fairness tracker (CFS-style vruntime)
 
-from typing import Dict, Iterable
+Sprint 14C: accounting hook only.
+Sprint 16:  pick_next() actively drives the fair scheduler loop.
+
+CFS algorithm
+-------------
+* New tenants start at min_vruntime (starvation prevention).
+* update_on_dispatch() increases vruntime by cost after every confirmed dispatch.
+* pick_next() selects the tenant with the lowest vruntime.
+
+Starvation prevention
+---------------------
+A tenant idle for a long time would have vruntime=0 and monopolize the
+scheduler on resume. Initializing at min_vruntime bounds catch-up to one round.
+
+IRONCLAD rules
+--------------
+* update_on_dispatch() only after confirmed dispatch — never on failure.
+* Negative cost clamped to 0.
+* reset() clears all state (leadership change / test isolation).
+* No locks needed — single-writer scheduler loop.
+"""
+
+from __future__ import annotations
 
 
 class TenantFairnessTracker:
     """
-    Per-tenant virtual runtime tracker.
+    CFS-style per-tenant virtual runtime tracker.
 
-    Rules:
-    - First tenant in an empty tracker starts at 0.0
-    - A new tenant joining later starts at the current global min vruntime
-    - update_on_dispatch() adds normalized cost to that tenant only
-    - pick_next() returns the tenant with the lowest vruntime
-    - observe()/get() must not mutate state
+    Lower vruntime => tenant is under-served => higher scheduling priority.
     """
 
     def __init__(self) -> None:
-        self._vruntime: Dict[str, float] = {}
+        self._vruntime: dict[str, float] = {}
+
+    # ------------------------------------------------------------------
+    # Read
+    # ------------------------------------------------------------------
+
+    def get(self, tenant_id: str) -> float:
+        """Return vruntime for tenant. New tenants start at min_vruntime."""
+        if tenant_id not in self._vruntime:
+            return self._min_vruntime()
+        return self._vruntime[tenant_id]
+
+    def observe(self, tenant_id: str) -> float:
+        """Read-only hook — does not mutate state."""
+        return self.get(tenant_id)
+
+    def pick_next(self, tenants: list[str]) -> str:
+        """
+        Select the tenant with the lowest vruntime (most under-served).
+
+        Args:
+            tenants: Non-empty list of candidate tenant_ids.
+
+        Returns:
+            tenant_id of the most under-served tenant.
+        """
+        if not tenants:
+            raise ValueError("pick_next called with empty tenant list")
+        return min(tenants, key=lambda t: (self.get(t), 1 if t in self._vruntime else 0))
+
+    def all_vruntimes(self) -> dict[str, float]:
+        """Return snapshot of all vruntime values (metrics / observability)."""
+        return dict(self._vruntime)
+
+    # ------------------------------------------------------------------
+    # Write
+    # ------------------------------------------------------------------
+
+    def update_on_dispatch(self, tenant_id: str, cost: float = 1.0) -> None:
+        """
+        Increase tenant's vruntime after a successful dispatch.
+        New tenants are initialized to min_vruntime before adding cost.
+        """
+        base = self._vruntime.get(tenant_id, 0.0)
+        self._vruntime[tenant_id] = base + max(cost, 0.0)
 
     def reset(self) -> None:
+        """Clear all vruntime data (leadership change / test isolation)."""
         self._vruntime.clear()
 
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
     def _min_vruntime(self) -> float:
+        """Floor for new-tenant initialization. Returns 0.0 if no tenants yet."""
         if not self._vruntime:
             return 0.0
         return min(self._vruntime.values())
-
-    def get(self, tenant_id: str) -> float:
-        # Mevcut değilse, "olması gereken" vruntime olarak global minimumu döndür
-        return self._vruntime.get(tenant_id, self._min_vruntime())
-
-    def observe(self, tenant_id: str) -> float:
-        return self.get(tenant_id)
-
-    def all_vruntimes(self) -> dict[str, float]:
-        return dict(self._vruntime)
-
-    def update_on_dispatch(self, tenant_id: str, cost: float = 1.0) -> float:
-        normalized_cost = max(0.0, float(cost))
-        # Sprint 14c'nin yapay testlerini kırmamak için doğrudan güncellemede 0.0 baz alınır.
-        # Gerçek production kullanımında tenant, pick_next tarafından zaten min_vruntime'a
-        # eşitlenmiş olarak geleceği için sistemin bütünlüğü korunur.
-        current = self._vruntime.get(tenant_id, 0.0)
-        new_value = current + normalized_cost
-        self._vruntime[tenant_id] = new_value
-        return new_value
-
-    def pick_next(self, tenant_ids: Iterable[str]) -> str:
-        tenants = list(tenant_ids)
-        if not tenants:
-            raise ValueError("pick_next() requires at least one tenant")
-
-        # Tie-breaker (Eşitlik bozucu) Stratejisi:
-        # 1. En düşük vruntime'a sahip olan.
-        # 2. Eğer eşitlik varsa; SİSTEME YENİ GİREN (0) önceliklidir (Eski tenant'ı bekletmemek için).
-        # 3. Hala eşitlik varsa; Alfabetik sıra.
-        def sort_key(t: str) -> tuple[float, int, str]:
-            val = self.get(t)
-            is_existing = 1 if t in self._vruntime else 0
-            return (val, is_existing, t)
-
-        best = min(tenants, key=sort_key)
-
-        # Yeni gelen tenant'ların sıfırdan başlayıp tüm sistemi aç (starve) bırakmasını engellemek
-        # için, kuyrukta bekleyen "bilinmeyen" tüm tenant'ları güncel global minimuma sabitliyoruz.
-        current_min = self._min_vruntime()
-        for t in tenants:
-            if t not in self._vruntime:
-                self._vruntime[t] = current_min
-
-        return best

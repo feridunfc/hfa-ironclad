@@ -8,7 +8,6 @@ They are the authoritative tests for rate-limit atomicity guarantees.
 
 from __future__ import annotations
 
-import asyncio
 import pytest
 
 from hfa_control.rate_limit import TenantRateLimiter

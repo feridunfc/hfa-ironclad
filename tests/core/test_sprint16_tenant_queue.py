@@ -14,10 +14,11 @@ Verifies:
 
 from __future__ import annotations
 
+import asyncio
 import pytest
 import fakeredis.aioredis as faredis
 
-from hfa_control.tenant_queue import TenantQueue
+from hfa_control.tenant_queue import TenantQueue, MAX_PRIORITY
 
 
 # ---------------------------------------------------------------------------
