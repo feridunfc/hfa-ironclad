@@ -20,7 +20,6 @@ from unittest.mock import AsyncMock
 from hfa.events.schema import RunAdmittedEvent
 from hfa_control.scheduler import Scheduler
 from hfa_control.models import ControlPlaneConfig, WorkerProfile, WorkerStatus
-from hfa_control.tenant_queue import TenantQueue
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +90,7 @@ async def test_direct_mode_schedule_still_works():
     evt = _event(run_id="run-direct-001")
     await sched._schedule(evt)
 
-    state = await redis.get(f"hfa:run:state:run-direct-001")
+    state = await redis.get("hfa:run:state:run-direct-001")
     s = state.decode() if isinstance(state, bytes) else state
     assert s == "scheduled"
 
@@ -233,8 +232,20 @@ async def test_two_tenants_get_equal_share():
 
     await sched._dispatch_fair_batch(max_dispatches=6)
 
-    scheduled_a = sum([1 for i in range(6) if (await redis.get(f"hfa:run:state:run-a-{i}") or b"").decode() == "scheduled"])
-    scheduled_b = sum([1 for i in range(6) if (await redis.get(f"hfa:run:state:run-b-{i}") or b"").decode() == "scheduled"])
+    scheduled_a = sum(
+        [
+            1
+            for i in range(6)
+            if (await redis.get(f"hfa:run:state:run-a-{i}") or b"").decode() == "scheduled"
+        ]
+    )
+    scheduled_b = sum(
+        [
+            1
+            for i in range(6)
+            if (await redis.get(f"hfa:run:state:run-b-{i}") or b"").decode() == "scheduled"
+        ]
+    )
 
     assert abs(scheduled_a - scheduled_b) <= 1, (
         f"Unfair dispatch: alpha={scheduled_a} beta={scheduled_b}"
@@ -283,10 +294,14 @@ async def test_high_priority_run_dispatched_first_within_tenant():
         await redis.hset(
             f"hfa:run:meta:{run_id}",
             mapping={
-                "run_id": run_id, "tenant_id": "acme",
-                "agent_type": "coder", "priority": str(pri),
-                "preferred_region": "", "preferred_placement": "LEAST_LOADED",
-                "admitted_at": str(now), "queue_state": "queued",
+                "run_id": run_id,
+                "tenant_id": "acme",
+                "agent_type": "coder",
+                "priority": str(pri),
+                "preferred_region": "",
+                "preferred_placement": "LEAST_LOADED",
+                "admitted_at": str(now),
+                "queue_state": "queued",
             },
         )
         await redis.expire(f"hfa:run:meta:{run_id}", 86400)

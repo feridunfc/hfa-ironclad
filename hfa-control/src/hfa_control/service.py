@@ -28,7 +28,7 @@ from hfa_control.shard import ShardOwnershipManager
 from hfa_control.admission import AdmissionController
 from hfa_control.scheduler import Scheduler
 from hfa_control.recovery import RecoveryService
-from hfa_control.audit import build_audit_logger, AuditLogger
+from hfa_control.audit import build_audit_logger
 from hfa_control.redis_resilience import RedisHealthMonitor
 from hfa.config.keys import RedisKey
 

@@ -168,7 +168,9 @@ class Scheduler:
                                 # Direct mode: schedule immediately (Sprint 10 behavior)
                                 await self._schedule(evt)
 
-                        await self._redis.xack(self._config.control_stream, _GROUP, msg_id)
+                        await self._redis.xack(
+                            self._config.control_stream, _GROUP, msg_id
+                        )
 
                 # Sprint 16: drain the fair queue after processing stream batch
                 if getattr(self._config, "fair_scheduling", False):
@@ -214,7 +216,8 @@ class Scheduler:
                             await self._enqueue_admitted(evt)
                             logger.debug(
                                 "Autoclaim: re-enqueued run=%s tenant=%s via fair queue",
-                                evt.run_id, evt.tenant_id,
+                                evt.run_id,
+                                evt.tenant_id,
                             )
                         else:
                             await self._schedule(evt)
@@ -236,6 +239,7 @@ class Scheduler:
         Idempotent — re-enqueuing the same run_id is a no-op (NX guard).
         """
         from hfa_control.tenant_queue import MAX_PRIORITY
+
         priority = max(1, min(int(event.priority), MAX_PRIORITY))
         admitted_at = getattr(event, "admitted_at", None) or time.time()
         ts_micros = int(admitted_at * 1_000_000) % int(1e12)
@@ -255,7 +259,10 @@ class Scheduler:
         if newly_added:
             logger.debug(
                 "Fair enqueue [atomic]: run=%s tenant=%s priority=%d score=%.0f",
-                event.run_id, event.tenant_id, priority, score,
+                event.run_id,
+                event.tenant_id,
+                priority,
+                score,
             )
         else:
             logger.debug(
@@ -287,7 +294,8 @@ class Scheduler:
                 logger.error(
                     "Fair dispatch: meta MISSING for run=%s (tenant=%s) — "
                     "quarantining as failed to prevent ghost run",
-                    run_id, chosen_tenant,
+                    run_id,
+                    chosen_tenant,
                 )
                 if _M:
                     try:
@@ -357,7 +365,8 @@ class Scheduler:
                     worker_group=worker_group,
                     shard=shard,
                     reschedule_count=0,
-                    admitted_at=getattr(event, "admitted_at", time.time()) or time.time(),
+                    admitted_at=getattr(event, "admitted_at", time.time())
+                    or time.time(),
                     running_zset=self._config.running_zset,
                 )
                 if not committed:

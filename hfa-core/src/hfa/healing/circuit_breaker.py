@@ -37,8 +37,8 @@ logger = logging.getLogger(__name__)
 
 
 class CircuitState(str, Enum):
-    CLOSED    = "closed"
-    OPEN      = "open"
+    CLOSED = "closed"
+    OPEN = "open"
     HALF_OPEN = "half_open"
 
 
@@ -68,18 +68,20 @@ class CircuitBreaker:
         failure_threshold: int = 5,
         recovery_timeout: int = 60,
     ) -> None:
-        self.name              = name
+        self.name = name
         self.failure_threshold = failure_threshold
-        self.recovery_timeout  = recovery_timeout
+        self.recovery_timeout = recovery_timeout
 
-        self._state:             CircuitState = CircuitState.CLOSED
-        self._failure_count:     int          = 0
-        self._last_failure_time: float        = 0.0
-        self._lock:              asyncio.Lock = asyncio.Lock()
+        self._state: CircuitState = CircuitState.CLOSED
+        self._failure_count: int = 0
+        self._last_failure_time: float = 0.0
+        self._lock: asyncio.Lock = asyncio.Lock()
 
         logger.info(
             "CircuitBreaker(%s) initialised: threshold=%d, recovery=%ds",
-            name, failure_threshold, recovery_timeout,
+            name,
+            failure_threshold,
+            recovery_timeout,
         )
 
     # ------------------------------------------------------------------
@@ -119,7 +121,7 @@ class CircuitBreaker:
         async with self._lock:
             if self._state != CircuitState.CLOSED:
                 logger.info("CircuitBreaker(%s) → CLOSED (success)", self.name)
-            self._state         = CircuitState.CLOSED
+            self._state = CircuitState.CLOSED
             self._failure_count = 0
 
     async def record_failure(self) -> None:
@@ -127,8 +129,8 @@ class CircuitBreaker:
         Increment failure counter. Trip breaker to OPEN at threshold.
         """
         async with self._lock:
-            self._failure_count      += 1
-            self._last_failure_time   = time.monotonic()
+            self._failure_count += 1
+            self._last_failure_time = time.monotonic()
 
             if self._failure_count >= self.failure_threshold:
                 if self._state != CircuitState.OPEN:
@@ -154,7 +156,7 @@ class CircuitBreaker:
             loop.create_task(self.record_success())
         except RuntimeError:
             # No running loop (sync test context)
-            self._state         = CircuitState.CLOSED
+            self._state = CircuitState.CLOSED
             self._failure_count = 0
 
     def record_failure_sync(self) -> None:
@@ -163,7 +165,7 @@ class CircuitBreaker:
             loop = asyncio.get_running_loop()
             loop.create_task(self.record_failure())
         except RuntimeError:
-            self._failure_count      += 1
-            self._last_failure_time   = time.monotonic()
+            self._failure_count += 1
+            self._last_failure_time = time.monotonic()
             if self._failure_count >= self.failure_threshold:
                 self._state = CircuitState.OPEN

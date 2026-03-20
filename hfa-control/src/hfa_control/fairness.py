@@ -12,6 +12,7 @@ from typing import List, Optional
 @dataclass
 class TenantPressure:
     """Tenant runtime pressure for fairness scoring."""
+
     tenant_id: str
     inflight: int
     weight: int = 1

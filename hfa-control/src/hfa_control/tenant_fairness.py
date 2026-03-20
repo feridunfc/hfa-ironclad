@@ -63,7 +63,9 @@ class TenantFairnessTracker:
         """
         if not tenants:
             raise ValueError("pick_next called with empty tenant list")
-        return min(tenants, key=lambda t: (self.get(t), 1 if t in self._vruntime else 0))
+        return min(
+            tenants, key=lambda t: (self.get(t), 1 if t in self._vruntime else 0)
+        )
 
     def all_vruntimes(self) -> dict[str, float]:
         """Return snapshot of all vruntime values (metrics / observability)."""

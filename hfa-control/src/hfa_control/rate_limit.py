@@ -68,10 +68,7 @@ _LUA_SCRIPT_PATH = (
 
 # Fallback: resolve relative to hfa package inside site-packages
 _LUA_SCRIPT_PATH_INSTALLED = (
-    Path(__file__).parent.parent.parent.parent
-    / "hfa"
-    / "lua"
-    / "rate_limit.lua"
+    Path(__file__).parent.parent.parent.parent / "hfa" / "lua" / "rate_limit.lua"
 )
 
 

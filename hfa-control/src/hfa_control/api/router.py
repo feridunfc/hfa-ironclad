@@ -42,7 +42,6 @@ IRONCLAD rules
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 from typing import List
 
@@ -83,11 +82,12 @@ from hfa_control.api.models import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/control/v1", tags=["control-plane"])
 
-from hfa_control.auth import require_operator, require_tenant, auth_status as _auth_status  # noqa: E402
+from hfa_control.auth import require_operator, require_tenant  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Backward-compat aliases (old names still used throughout this file)
 # ---------------------------------------------------------------------------
+
 
 def _require_operator(x_cp_auth: str = "") -> None:
     """Delegate to auth module — constant-time HMAC validation."""
@@ -530,7 +530,9 @@ async def replay_dlq(
         await request.app.state.cp.recovery.replay_dlq_run(run_id, x_tenant_id)
         audit = getattr(request.app.state.cp, "_audit", None)
         if audit:
-            await audit.dlq_replay(run_id=run_id, tenant_id=x_tenant_id, operator="operator")
+            await audit.dlq_replay(
+                run_id=run_id, tenant_id=x_tenant_id, operator="operator"
+            )
         return {"run_id": run_id, "status": "replayed"}
     except DLQEntryNotFoundError:
         raise HTTPException(status_code=404, detail=f"DLQ entry {run_id!r} not found")

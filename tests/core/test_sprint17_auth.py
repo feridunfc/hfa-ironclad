@@ -25,6 +25,7 @@ from fastapi import HTTPException
 # Helpers to reload auth module with different env vars
 # ---------------------------------------------------------------------------
 
+
 def _load_auth(secret: str = "", app_env: str = "development"):
     """Reload auth module with given env vars."""
     env_backup = os.environ.copy()
@@ -38,6 +39,7 @@ def _load_auth(secret: str = "", app_env: str = "development"):
 
     try:
         import hfa_control.auth as auth_mod
+
         importlib.reload(auth_mod)
         return auth_mod
     finally:
@@ -120,6 +122,7 @@ def test_uses_hmac_compare_not_equality():
     """
     import inspect
     import hfa_control.auth as auth_mod
+
     source = inspect.getsource(auth_mod)
     assert "hmac.compare_digest" in source, (
         "auth.py must use hmac.compare_digest for constant-time comparison"
@@ -140,12 +143,14 @@ def test_uses_hmac_compare_not_equality():
 
 def test_require_tenant_returns_stripped_value():
     import hfa_control.auth as auth_mod
+
     result = auth_mod.require_tenant("  acme  ")
     assert result == "acme"
 
 
 def test_require_tenant_empty_raises_400():
     import hfa_control.auth as auth_mod
+
     with pytest.raises(HTTPException) as exc_info:
         auth_mod.require_tenant("")
     assert exc_info.value.status_code == 400
@@ -153,6 +158,7 @@ def test_require_tenant_empty_raises_400():
 
 def test_require_tenant_whitespace_only_raises_400():
     import hfa_control.auth as auth_mod
+
     with pytest.raises(HTTPException) as exc_info:
         auth_mod.require_tenant("   ")
     assert exc_info.value.status_code == 400

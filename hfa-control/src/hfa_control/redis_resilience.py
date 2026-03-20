@@ -53,7 +53,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-import time
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -62,11 +61,11 @@ logger = logging.getLogger(__name__)
 # Retry policy defaults
 # ---------------------------------------------------------------------------
 
-DEFAULT_MAX_ATTEMPTS   = 5
-DEFAULT_BASE_DELAY     = 0.1   # seconds
-DEFAULT_MAX_DELAY      = 10.0  # seconds
+DEFAULT_MAX_ATTEMPTS = 5
+DEFAULT_BASE_DELAY = 0.1  # seconds
+DEFAULT_MAX_DELAY = 10.0  # seconds
 DEFAULT_BACKOFF_FACTOR = 2.0
-DEFAULT_JITTER_FACTOR  = 0.2   # ±20% jitter
+DEFAULT_JITTER_FACTOR = 0.2  # ±20% jitter
 
 # ---------------------------------------------------------------------------
 # Error classification
@@ -117,9 +116,11 @@ def _is_transient(exc: Exception) -> bool:
     return "redis" in exc_type or "connection" in exc_type
 
 
-def _backoff_delay(attempt: int, base: float, factor: float, max_delay: float, jitter: float) -> float:
+def _backoff_delay(
+    attempt: int, base: float, factor: float, max_delay: float, jitter: float
+) -> float:
     """Compute jittered exponential backoff delay."""
-    raw = min(base * (factor ** attempt), max_delay)
+    raw = min(base * (factor**attempt), max_delay)
     spread = raw * jitter
     return raw + random.uniform(-spread, spread)
 
@@ -127,6 +128,7 @@ def _backoff_delay(attempt: int, base: float, factor: float, max_delay: float, j
 # ---------------------------------------------------------------------------
 # Retry wrapper
 # ---------------------------------------------------------------------------
+
 
 async def with_redis_retry(
     fn: Callable,
@@ -177,16 +179,24 @@ async def with_redis_retry(
 
             last_exc = exc
             if attempt < max_attempts - 1:
-                delay = _backoff_delay(attempt, base_delay, backoff_factor, max_delay, jitter_factor)
+                delay = _backoff_delay(
+                    attempt, base_delay, backoff_factor, max_delay, jitter_factor
+                )
                 logger.warning(
                     "Redis transient error on %s (attempt %d/%d): %s — retrying in %.2fs",
-                    label, attempt + 1, max_attempts, exc, delay,
+                    label,
+                    attempt + 1,
+                    max_attempts,
+                    exc,
+                    delay,
                 )
                 await asyncio.sleep(delay)
             else:
                 logger.error(
                     "Redis error on %s exhausted %d attempts: %s",
-                    label, max_attempts, exc,
+                    label,
+                    max_attempts,
+                    exc,
                 )
 
     raise last_exc  # type: ignore[misc]
@@ -195,6 +205,7 @@ async def with_redis_retry(
 # ---------------------------------------------------------------------------
 # RedisHealthMonitor
 # ---------------------------------------------------------------------------
+
 
 class RedisHealthMonitor:
     """
@@ -208,12 +219,12 @@ class RedisHealthMonitor:
     """
 
     def __init__(self, redis, interval: float = 5.0, timeout: float = 2.0) -> None:
-        self._redis     = redis
-        self._interval  = interval
-        self._timeout   = timeout
-        self._healthy   = True
-        self._last_err: Optional[str]  = None
-        self._failures  = 0
+        self._redis = redis
+        self._interval = interval
+        self._timeout = timeout
+        self._healthy = True
+        self._last_err: Optional[str] = None
+        self._failures = 0
         self._task: Optional[asyncio.Task] = None
 
     async def start(self) -> None:
@@ -248,17 +259,18 @@ class RedisHealthMonitor:
                 await asyncio.wait_for(self._redis.ping(), timeout=self._timeout)
                 if not self._healthy:
                     logger.info("Redis recovered after %d failure(s)", self._failures)
-                self._healthy  = True
+                self._healthy = True
                 self._failures = 0
                 self._last_err = None
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                self._healthy   = False
+                self._healthy = False
                 self._failures += 1
-                self._last_err  = str(exc)
+                self._last_err = str(exc)
                 logger.warning(
                     "Redis health check failed (consecutive=%d): %s",
-                    self._failures, exc,
+                    self._failures,
+                    exc,
                 )
             await asyncio.sleep(self._interval)

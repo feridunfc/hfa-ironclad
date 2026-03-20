@@ -132,8 +132,6 @@ def test_sprint10_routes_preserved():
 # ---------------------------------------------------------------------------
 
 
-
-
 async def _seed(redis, wid, status="healthy", inflight=0, capacity=10):
     await redis.hset(
         f"hfa:cp:worker:{wid}",

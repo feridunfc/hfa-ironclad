@@ -74,7 +74,9 @@ else:
             "CP_AUTH_SECRET is shorter than 32 characters. "
             "Use a strong random secret (e.g. openssl rand -hex 32)."
         )
-    logger.info("CP_AUTH_SECRET loaded (len=%d, env=%s)", len(_CP_AUTH_SECRET), _APP_ENV)
+    logger.info(
+        "CP_AUTH_SECRET loaded (len=%d, env=%s)", len(_CP_AUTH_SECRET), _APP_ENV
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +103,9 @@ def require_operator(x_cp_auth: str = "") -> None:
                 ),
             )
         # Development/test: allow without secret (log warning)
-        logger.debug("require_operator: skipped (CP_AUTH_SECRET not set, non-production)")
+        logger.debug(
+            "require_operator: skipped (CP_AUTH_SECRET not set, non-production)"
+        )
         return
 
     if not x_cp_auth:

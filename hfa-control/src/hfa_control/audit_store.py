@@ -25,11 +25,10 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-AUDIT_TTL = 30 * 86_400   # 30 days
+AUDIT_TTL = 30 * 86_400  # 30 days
 AUDIT_INDEX_KEY = "hfa:audit:index"
 
 
@@ -53,6 +52,7 @@ class RedisLedgerStore:
         Also updates the global audit index ZSET.
         """
         import time
+
         key = self._key(entry.tenant_id, entry.run_id)
         try:
             data = json.dumps(entry.to_dict(), separators=(",", ":"))
@@ -68,13 +68,16 @@ class RedisLedgerStore:
         except Exception as exc:
             logger.error(
                 "RedisLedgerStore.append failed: tenant=%s run=%s %s",
-                entry.tenant_id, entry.run_id, exc,
+                entry.tenant_id,
+                entry.run_id,
+                exc,
             )
             raise
 
     async def get_last(self, tenant_id: str, run_id: str):
         """Return the most recent LedgerEntry, or None if empty."""
         from hfa.governance.signed_ledger_v1 import LedgerEntry
+
         key = self._key(tenant_id, run_id)
         try:
             raw = await self._redis.lindex(key, -1)
@@ -85,13 +88,16 @@ class RedisLedgerStore:
         except Exception as exc:
             logger.error(
                 "RedisLedgerStore.get_last failed: tenant=%s run=%s %s",
-                tenant_id, run_id, exc,
+                tenant_id,
+                run_id,
+                exc,
             )
             return None
 
     async def get_all(self, tenant_id: str, run_id: str) -> list:
         """Return all LedgerEntries in insertion order."""
         from hfa.governance.signed_ledger_v1 import LedgerEntry
+
         key = self._key(tenant_id, run_id)
         try:
             raw_list = await self._redis.lrange(key, 0, -1)
@@ -101,13 +107,13 @@ class RedisLedgerStore:
                     data = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
                     entries.append(LedgerEntry(**data))
                 except Exception as exc:
-                    logger.warning(
-                        "RedisLedgerStore: skipping corrupt entry: %s", exc
-                    )
+                    logger.warning("RedisLedgerStore: skipping corrupt entry: %s", exc)
             return entries
         except Exception as exc:
             logger.error(
                 "RedisLedgerStore.get_all failed: tenant=%s run=%s %s",
-                tenant_id, run_id, exc,
+                tenant_id,
+                run_id,
+                exc,
             )
             return []

@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -60,14 +60,14 @@ logger = logging.getLogger(__name__)
 
 
 class AuditEvent:
-    ADMITTED       = "ADMITTED"
-    REJECTED       = "REJECTED"
-    SCHEDULED      = "SCHEDULED"
-    DRAIN_STARTED  = "DRAIN_STARTED"
-    DLQ_REPLAY     = "DLQ_REPLAY"
-    DLQ_DELETED    = "DLQ_DELETED"
-    RESCHEDULE     = "RESCHEDULE"
-    AUTH_FAILURE   = "AUTH_FAILURE"
+    ADMITTED = "ADMITTED"
+    REJECTED = "REJECTED"
+    SCHEDULED = "SCHEDULED"
+    DRAIN_STARTED = "DRAIN_STARTED"
+    DLQ_REPLAY = "DLQ_REPLAY"
+    DLQ_DELETED = "DLQ_DELETED"
+    RESCHEDULE = "RESCHEDULE"
+    AUTH_FAILURE = "AUTH_FAILURE"
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +179,7 @@ class AuditLogger:
     ) -> None:
         await self._emit(
             event_type=AuditEvent.DRAIN_STARTED,
-            run_id=worker_id,   # reuse run_id field for worker_id
+            run_id=worker_id,  # reuse run_id field for worker_id
             tenant_id="__operator__",
             data={
                 "worker_id": worker_id,
@@ -261,12 +261,16 @@ class AuditLogger:
             )
             logger.debug(
                 "Audit: %s run=%s tenant=%s",
-                event_type, run_id, tenant_id,
+                event_type,
+                run_id,
+                tenant_id,
             )
         except Exception as exc:
             logger.error(
                 "AuditLogger._emit failed: event=%s run=%s %s",
-                event_type, run_id, exc,
+                event_type,
+                run_id,
+                exc,
                 exc_info=True,
             )
             # Never propagate — audit must not break the critical path
@@ -284,6 +288,7 @@ def build_audit_logger(redis) -> AuditLogger:
     Returns a no-op AuditLogger if HFA_LEDGER_KEY_ID is not set.
     """
     import os
+
     key_id = os.environ.get("HFA_LEDGER_KEY_ID", "").strip()
 
     if not key_id:
@@ -295,6 +300,7 @@ def build_audit_logger(redis) -> AuditLogger:
 
     try:
         from hfa.governance.signed_ledger_v1 import Ed25519EnvKeyProvider
+
         provider = Ed25519EnvKeyProvider()
         return AuditLogger(redis=redis, key_provider=provider)
     except Exception as exc:

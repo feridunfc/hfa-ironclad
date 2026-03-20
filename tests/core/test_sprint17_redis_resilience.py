@@ -84,7 +84,9 @@ def test_backoff_delay_capped_at_max():
 
 
 def test_backoff_jitter_produces_variation():
-    delays = {_backoff_delay(1, base=1.0, factor=2.0, max_delay=10.0, jitter=0.2) for _ in range(20)}
+    delays = {
+        _backoff_delay(1, base=1.0, factor=2.0, max_delay=10.0, jitter=0.2) for _ in range(20)
+    }
     assert len(delays) > 1, "Jitter should produce different values"
 
 

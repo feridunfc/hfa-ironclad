@@ -19,7 +19,7 @@ import asyncio
 import time
 import pytest
 
-from hfa.healing.circuit_breaker import CircuitBreaker, CircuitState, CircuitOpenError
+from hfa.healing.circuit_breaker import CircuitBreaker, CircuitState
 
 
 # ---------------------------------------------------------------------------
@@ -36,12 +36,8 @@ def test_circuit_breaker_uses_asyncio_lock_not_threading():
     assert "from threading import Lock" not in source, (
         "CircuitBreaker must not import threading.Lock"
     )
-    assert "threading.Lock" not in source, (
-        "CircuitBreaker must not use threading.Lock"
-    )
-    assert "asyncio.Lock" in source, (
-        "CircuitBreaker must use asyncio.Lock"
-    )
+    assert "threading.Lock" not in source, "CircuitBreaker must not use threading.Lock"
+    assert "asyncio.Lock" in source, "CircuitBreaker must use asyncio.Lock"
 
 
 # ---------------------------------------------------------------------------
@@ -156,8 +152,7 @@ async def test_concurrent_failures_do_not_corrupt_state():
 async def test_concurrent_success_and_failure_no_deadlock():
     """Mixing success and failure calls concurrently must not deadlock."""
     cb = CircuitBreaker("test", failure_threshold=100, recovery_timeout=60)
-    tasks = [cb.record_failure() for _ in range(25)] + \
-            [cb.record_success() for _ in range(25)]
+    tasks = [cb.record_failure() for _ in range(25)] + [cb.record_success() for _ in range(25)]
     # Should complete without hanging
     await asyncio.wait_for(asyncio.gather(*tasks), timeout=2.0)
 
@@ -170,5 +165,5 @@ async def test_concurrent_success_and_failure_no_deadlock():
 def test_is_open_is_synchronous():
     """is_open() must be callable without await."""
     cb = CircuitBreaker("test")
-    result = cb.is_open()   # no await — must not raise
+    result = cb.is_open()  # no await — must not raise
     assert isinstance(result, bool)

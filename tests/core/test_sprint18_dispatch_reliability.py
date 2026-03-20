@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 import fakeredis.aioredis as faredis
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 from hfa.events.schema import RunAdmittedEvent
 from hfa.config.keys import RedisKey, RedisTTL
@@ -33,16 +33,22 @@ def _cfg(fair: bool = False) -> ControlPlaneConfig:
 
 def _worker(wid="w0", group="grp-a", capacity=10, inflight=0) -> WorkerProfile:
     return WorkerProfile(
-        worker_id=wid, worker_group=group, region="us-east-1",
-        capacity=capacity, inflight=inflight,
-        status=WorkerStatus.HEALTHY, capabilities=[],
+        worker_id=wid,
+        worker_group=group,
+        region="us-east-1",
+        capacity=capacity,
+        inflight=inflight,
+        status=WorkerStatus.HEALTHY,
+        capabilities=[],
     )
 
 
 def _event(run_id="run-001", tenant_id="acme", priority=5) -> RunAdmittedEvent:
     return RunAdmittedEvent(
-        run_id=run_id, tenant_id=tenant_id,
-        agent_type="coder", priority=priority,
+        run_id=run_id,
+        tenant_id=tenant_id,
+        agent_type="coder",
+        priority=priority,
         preferred_placement="LEAST_LOADED",
     )
 
@@ -124,6 +130,7 @@ async def test_missing_meta_quarantined_not_silently_dropped():
 
     # Manually add a run to the queue without writing meta
     from hfa_control.tenant_queue import TenantQueue
+
     q = TenantQueue(redis)
     await q.enqueue("acme", "run-ghost", priority=5, now=1000.0)
     # No meta written — simulates partial failure
@@ -169,9 +176,14 @@ async def test_dispatch_commit_succeeds_from_admitted_state():
     await redis.set(RedisKey.run_state(run_id), "admitted", ex=RedisTTL.RUN_STATE)
 
     committed = await lua.dispatch_commit(
-        run_id=run_id, tenant_id="acme", agent_type="coder",
-        worker_group="grp-a", shard=4, reschedule_count=0,
-        admitted_at=1000.0, running_zset=RedisKey.cp_running(),
+        run_id=run_id,
+        tenant_id="acme",
+        agent_type="coder",
+        worker_group="grp-a",
+        shard=4,
+        reschedule_count=0,
+        admitted_at=1000.0,
+        running_zset=RedisKey.cp_running(),
     )
     assert committed is True
 
@@ -191,9 +203,14 @@ async def test_dispatch_commit_succeeds_from_queued_state():
     await redis.set(RedisKey.run_state(run_id), "queued", ex=RedisTTL.RUN_STATE)
 
     committed = await lua.dispatch_commit(
-        run_id=run_id, tenant_id="acme", agent_type="coder",
-        worker_group="grp-a", shard=4, reschedule_count=0,
-        admitted_at=1000.0, running_zset=RedisKey.cp_running(),
+        run_id=run_id,
+        tenant_id="acme",
+        agent_type="coder",
+        worker_group="grp-a",
+        shard=4,
+        reschedule_count=0,
+        admitted_at=1000.0,
+        running_zset=RedisKey.cp_running(),
     )
     assert committed is True
 
@@ -209,9 +226,14 @@ async def test_dispatch_commit_rejects_already_scheduled():
     await redis.set(RedisKey.run_state(run_id), "scheduled", ex=RedisTTL.RUN_STATE)
 
     committed = await lua.dispatch_commit(
-        run_id=run_id, tenant_id="acme", agent_type="coder",
-        worker_group="grp-a", shard=4, reschedule_count=0,
-        admitted_at=1000.0, running_zset=RedisKey.cp_running(),
+        run_id=run_id,
+        tenant_id="acme",
+        agent_type="coder",
+        worker_group="grp-a",
+        shard=4,
+        reschedule_count=0,
+        admitted_at=1000.0,
+        running_zset=RedisKey.cp_running(),
     )
     assert committed is False, "Double-dispatch must be rejected"
 
@@ -228,9 +250,14 @@ async def test_dispatch_commit_rejects_terminal_states():
         await redis.set(RedisKey.run_state(run_id), terminal_state, ex=RedisTTL.RUN_STATE)
 
         committed = await lua.dispatch_commit(
-            run_id=run_id, tenant_id="acme", agent_type="coder",
-            worker_group="grp-a", shard=4, reschedule_count=0,
-            admitted_at=1000.0, running_zset=RedisKey.cp_running(),
+            run_id=run_id,
+            tenant_id="acme",
+            agent_type="coder",
+            worker_group="grp-a",
+            shard=4,
+            reschedule_count=0,
+            admitted_at=1000.0,
+            running_zset=RedisKey.cp_running(),
         )
         assert committed is False, f"Terminal state '{terminal_state}' must be rejected"
 
@@ -247,9 +274,14 @@ async def test_dispatch_commit_adds_to_running_zset():
     await redis.set(RedisKey.run_state(run_id), "admitted", ex=RedisTTL.RUN_STATE)
 
     await lua.dispatch_commit(
-        run_id=run_id, tenant_id="acme", agent_type="coder",
-        worker_group="grp-a", shard=4, reschedule_count=0,
-        admitted_at=1000.0, running_zset=running_zset,
+        run_id=run_id,
+        tenant_id="acme",
+        agent_type="coder",
+        worker_group="grp-a",
+        shard=4,
+        reschedule_count=0,
+        admitted_at=1000.0,
+        running_zset=running_zset,
     )
 
     score = await redis.zscore(running_zset, run_id)
@@ -267,12 +299,18 @@ async def test_dispatch_commit_updates_meta():
     await redis.set(RedisKey.run_state(run_id), "admitted", ex=RedisTTL.RUN_STATE)
 
     await lua.dispatch_commit(
-        run_id=run_id, tenant_id="acme", agent_type="coder",
-        worker_group="grp-a", shard=7, reschedule_count=0,
-        admitted_at=1000.0, running_zset=RedisKey.cp_running(),
+        run_id=run_id,
+        tenant_id="acme",
+        agent_type="coder",
+        worker_group="grp-a",
+        shard=7,
+        reschedule_count=0,
+        admitted_at=1000.0,
+        running_zset=RedisKey.cp_running(),
     )
 
     meta = await redis.hgetall(RedisKey.run_meta(run_id))
+
     def _s(k):
         v = meta.get(k.encode()) or meta.get(k)
         return (v.decode() if isinstance(v, bytes) else v) or ""
@@ -301,7 +339,11 @@ async def test_full_fair_pipeline_enqueue_and_dispatch():
 
     # Verify queued state
     state_after_enqueue = await redis.get(RedisKey.run_state("run-e2e"))
-    s = (state_after_enqueue.decode() if isinstance(state_after_enqueue, bytes) else state_after_enqueue) or ""
+    s = (
+        state_after_enqueue.decode()
+        if isinstance(state_after_enqueue, bytes)
+        else state_after_enqueue
+    ) or ""
     assert s == "queued"
 
     # Dispatch
@@ -309,5 +351,9 @@ async def test_full_fair_pipeline_enqueue_and_dispatch():
 
     # Verify scheduled state
     state_after_dispatch = await redis.get(RedisKey.run_state("run-e2e"))
-    s2 = (state_after_dispatch.decode() if isinstance(state_after_dispatch, bytes) else state_after_dispatch) or ""
+    s2 = (
+        state_after_dispatch.decode()
+        if isinstance(state_after_dispatch, bytes)
+        else state_after_dispatch
+    ) or ""
     assert s2 == "scheduled"

@@ -44,8 +44,8 @@ from hfa.config.keys import RedisKey
 
 logger = logging.getLogger(__name__)
 
-MAX_PRIORITY = 100         # priorities are 1–100; score inverts so 1 = lowest score
-QUEUE_IDLE_TTL = 86_400    # 24h TTL on idle queues
+MAX_PRIORITY = 100  # priorities are 1–100; score inverts so 1 = lowest score
+QUEUE_IDLE_TTL = 86_400  # 24h TTL on idle queues
 
 
 class TenantQueue:
@@ -102,7 +102,10 @@ class TenantQueue:
 
         logger.debug(
             "TenantQueue.enqueue: tenant=%s run=%s priority=%d score=%.0f",
-            tenant_id, run_id, priority, score,
+            tenant_id,
+            run_id,
+            priority,
+            score,
         )
 
     # ------------------------------------------------------------------
@@ -136,7 +139,10 @@ class TenantQueue:
 
         logger.debug(
             "TenantQueue.dequeue: tenant=%s run=%s score=%.0f remaining=%d",
-            tenant_id, run_id, score, remaining,
+            tenant_id,
+            run_id,
+            score,
+            remaining,
         )
         return run_id
 
@@ -179,10 +185,7 @@ class TenantQueue:
         Sourced from the active-tenant SET (eventually consistent).
         """
         raw = await self._redis.smembers(RedisKey.tenant_active_set())
-        return [
-            r.decode() if isinstance(r, bytes) else r
-            for r in raw
-        ]
+        return [r.decode() if isinstance(r, bytes) else r for r in raw]
 
     async def all_depths(self) -> dict[str, int]:
         """Return {tenant_id: depth} for all active tenants."""

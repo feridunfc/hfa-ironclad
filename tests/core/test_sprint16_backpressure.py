@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import pytest
 import fakeredis.aioredis as faredis
-from unittest.mock import AsyncMock
 
 from hfa_control.tenant_queue import TenantQueue
 from hfa_control.tenant_fairness import TenantFairnessTracker

@@ -78,7 +78,6 @@ def redis_container():
 # ---------------------------------------------------------------------------
 
 
-
 @pytest_asyncio.fixture
 async def real_redis(redis_container):
     """

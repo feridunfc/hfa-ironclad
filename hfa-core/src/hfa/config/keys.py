@@ -78,13 +78,13 @@ class RedisTTL:
     SHARD_MAXLEN:     Approximate max entries in shard run streams.
     """
 
-    RUN_STATE: int = 86_400        # 24 h
-    RUN_META: int = 86_400         # 24 h
-    RUN_RESULT: int = 86_400       # 24 h
-    RUN_CLAIM: int = 300           # 5 min
-    DLQ_META: int = 604_800        # 7 days
+    RUN_STATE: int = 86_400  # 24 h
+    RUN_META: int = 86_400  # 24 h
+    RUN_RESULT: int = 86_400  # 24 h
+    RUN_CLAIM: int = 300  # 5 min
+    DLQ_META: int = 604_800  # 7 days
     TENANT_INFLIGHT: int = 86_400  # 24 h
-    TENANT_RATE: int = 3_600       # 1 h
+    TENANT_RATE: int = 3_600  # 1 h
     STREAM_MAXLEN: int = 100_000
     SHARD_MAXLEN: int = 50_000
 

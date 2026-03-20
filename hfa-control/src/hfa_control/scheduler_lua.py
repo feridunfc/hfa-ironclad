@@ -24,7 +24,13 @@ from hfa.lua.loader import LuaScriptLoader
 logger = logging.getLogger(__name__)
 
 # Paths relative to this package's repo location
-_LUA_DIR = Path(__file__).parent.parent.parent.parent.parent / "hfa-core" / "src" / "hfa" / "lua"
+_LUA_DIR = (
+    Path(__file__).parent.parent.parent.parent.parent
+    / "hfa-core"
+    / "src"
+    / "hfa"
+    / "lua"
+)
 
 # Fallback: installed package path
 _LUA_DIR_INSTALLED = Path(__file__).parent.parent.parent.parent / "hfa" / "lua"
@@ -56,7 +62,7 @@ class SchedulerLua:
     def __init__(self, redis) -> None:
         self._redis = redis
         self._enqueue_loader: Optional[LuaScriptLoader] = None
-        self._commit_loader:  Optional[LuaScriptLoader] = None
+        self._commit_loader: Optional[LuaScriptLoader] = None
 
     async def initialise(self) -> None:
         """Load both Lua scripts into Redis. Safe to call multiple times."""
@@ -65,7 +71,10 @@ class SchedulerLua:
             self._enqueue_loader = LuaScriptLoader(self._redis, enqueue_path)
             await self._enqueue_loader.load()
         except FileNotFoundError as exc:
-            logger.warning("SchedulerLua: enqueue_admitted.lua not found: %s — fallback active", exc)
+            logger.warning(
+                "SchedulerLua: enqueue_admitted.lua not found: %s — fallback active",
+                exc,
+            )
             self._enqueue_loader = None
 
         try:
@@ -73,12 +82,24 @@ class SchedulerLua:
             self._commit_loader = LuaScriptLoader(self._redis, commit_path)
             await self._commit_loader.load()
         except FileNotFoundError as exc:
-            logger.warning("SchedulerLua: dispatch_commit.lua not found: %s — fallback active", exc)
+            logger.warning(
+                "SchedulerLua: dispatch_commit.lua not found: %s — fallback active", exc
+            )
             self._commit_loader = None
 
-        enqueue_sha = self._enqueue_loader.sha[:8] if (self._enqueue_loader and self._enqueue_loader.sha) else "fallback"
-        commit_sha  = self._commit_loader.sha[:8]  if (self._commit_loader  and self._commit_loader.sha)  else "fallback"
-        logger.info("SchedulerLua initialised: enqueue=%s… commit=%s…", enqueue_sha, commit_sha)
+        enqueue_sha = (
+            self._enqueue_loader.sha[:8]
+            if (self._enqueue_loader and self._enqueue_loader.sha)
+            else "fallback"
+        )
+        commit_sha = (
+            self._commit_loader.sha[:8]
+            if (self._commit_loader and self._commit_loader.sha)
+            else "fallback"
+        )
+        logger.info(
+            "SchedulerLua initialised: enqueue=%s… commit=%s…", enqueue_sha, commit_sha
+        )
 
     # ------------------------------------------------------------------
     # 18.1 Atomic enqueue
@@ -106,10 +127,10 @@ class SchedulerLua:
         Returns True if newly enqueued, False if already present (idempotent).
         Falls back to multi-step write if Lua not available.
         """
-        queue_key  = RedisKey.tenant_queue(tenant_id)
-        meta_key   = RedisKey.run_meta(run_id)
+        queue_key = RedisKey.tenant_queue(tenant_id)
+        meta_key = RedisKey.run_meta(run_id)
         active_key = RedisKey.tenant_active_set()
-        state_key  = RedisKey.run_state(run_id)
+        state_key = RedisKey.run_state(run_id)
 
         if self._enqueue_loader is not None:
             try:
@@ -125,47 +146,78 @@ class SchedulerLua:
                         preferred_region or "",
                         preferred_placement or "LEAST_LOADED",
                         str(admitted_at),
-                        RedisTTL.RUN_META,      # queue_ttl
-                        RedisTTL.RUN_META,      # meta_ttl
-                        RedisTTL.RUN_STATE,     # state_ttl
+                        RedisTTL.RUN_META,  # queue_ttl
+                        RedisTTL.RUN_META,  # meta_ttl
+                        RedisTTL.RUN_STATE,  # state_ttl
                     ],
                     fallback=lambda: self._enqueue_fallback(
-                        queue_key, meta_key, active_key, state_key,
-                        run_id, tenant_id, agent_type, priority,
-                        preferred_region, preferred_placement, admitted_at, score,
+                        queue_key,
+                        meta_key,
+                        active_key,
+                        state_key,
+                        run_id,
+                        tenant_id,
+                        agent_type,
+                        priority,
+                        preferred_region,
+                        preferred_placement,
+                        admitted_at,
+                        score,
                     ),
                 )
                 return bool(result)
             except Exception as exc:
-                logger.warning("SchedulerLua.enqueue_admitted Lua failed: %s — using fallback", exc)
+                logger.warning(
+                    "SchedulerLua.enqueue_admitted Lua failed: %s — using fallback", exc
+                )
 
         # Direct fallback (fakeredis / Lua unavailable)
         return await self._enqueue_fallback(
-            queue_key, meta_key, active_key, state_key,
-            run_id, tenant_id, agent_type, priority,
-            preferred_region, preferred_placement, admitted_at, score,
+            queue_key,
+            meta_key,
+            active_key,
+            state_key,
+            run_id,
+            tenant_id,
+            agent_type,
+            priority,
+            preferred_region,
+            preferred_placement,
+            admitted_at,
+            score,
         )
 
     async def _enqueue_fallback(
         self,
-        queue_key: str, meta_key: str, active_key: str, state_key: str,
-        run_id: str, tenant_id: str, agent_type: str, priority: int,
-        preferred_region: str, preferred_placement: str,
-        admitted_at: float, score: float,
+        queue_key: str,
+        meta_key: str,
+        active_key: str,
+        state_key: str,
+        run_id: str,
+        tenant_id: str,
+        agent_type: str,
+        priority: int,
+        preferred_region: str,
+        preferred_placement: str,
+        admitted_at: float,
+        score: float,
     ) -> bool:
         """Non-atomic fallback for unit tests / Lua-unavailable environments."""
         pipe = self._redis.pipeline()
         pipe.zadd(queue_key, {run_id: score}, nx=True)
-        pipe.hset(meta_key, mapping={
-            "run_id": run_id,
-            "tenant_id": tenant_id,
-            "agent_type": agent_type,
-            "priority": str(priority),
-            "preferred_region": preferred_region or "",
-            "preferred_placement": preferred_placement or "LEAST_LOADED",
-            "admitted_at": str(admitted_at),
-            "queue_state": "queued",
-        })
+        pipe.hset(
+            meta_key,
+            mapping={
+                "run_id": run_id,
+                "tenant_id": tenant_id,
+                "agent_type": agent_type,
+                "priority": str(priority),
+                "preferred_region": preferred_region or "",
+                "preferred_placement": preferred_placement or "LEAST_LOADED",
+                "admitted_at": str(admitted_at),
+                "queue_state": "queued",
+            },
+        )
         pipe.set(state_key, "queued", ex=RedisTTL.RUN_STATE)
         pipe.sadd(active_key, tenant_id)
         pipe.expire(queue_key, RedisTTL.RUN_META)
@@ -202,8 +254,8 @@ class SchedulerLua:
         Falls back to non-atomic writes if Lua not available.
         """
         state_key = RedisKey.run_state(run_id)
-        meta_key  = RedisKey.run_meta(run_id)
-        now       = time.time()
+        meta_key = RedisKey.run_meta(run_id)
+        now = time.time()
 
         if self._commit_loader is not None:
             try:
@@ -223,40 +275,75 @@ class SchedulerLua:
                         RedisTTL.RUN_META,
                     ],
                     fallback=lambda: self._commit_fallback(
-                        state_key, meta_key, running_zset,
-                        run_id, tenant_id, agent_type, worker_group,
-                        shard, reschedule_count, admitted_at, now,
+                        state_key,
+                        meta_key,
+                        running_zset,
+                        run_id,
+                        tenant_id,
+                        agent_type,
+                        worker_group,
+                        shard,
+                        reschedule_count,
+                        admitted_at,
+                        now,
                     ),
                 )
                 return bool(result)
             except Exception as exc:
-                logger.warning("SchedulerLua.dispatch_commit Lua failed: %s — using fallback", exc)
+                logger.warning(
+                    "SchedulerLua.dispatch_commit Lua failed: %s — using fallback", exc
+                )
 
         return await self._commit_fallback(
-            state_key, meta_key, running_zset,
-            run_id, tenant_id, agent_type, worker_group,
-            shard, reschedule_count, admitted_at, now,
+            state_key,
+            meta_key,
+            running_zset,
+            run_id,
+            tenant_id,
+            agent_type,
+            worker_group,
+            shard,
+            reschedule_count,
+            admitted_at,
+            now,
         )
 
     async def _commit_fallback(
-        self, state_key: str, meta_key: str, running_zset: str, run_id: str, tenant_id: str, agent_type: str, worker_group: str,
-        shard: int, reschedule_count: int, admitted_at: float, scheduled_at: float,
+        self,
+        state_key: str,
+        meta_key: str,
+        running_zset: str,
+        run_id: str,
+        tenant_id: str,
+        agent_type: str,
+        worker_group: str,
+        shard: int,
+        reschedule_count: int,
+        admitted_at: float,
+        scheduled_at: float,
     ) -> bool:
         curr = await self._redis.get(state_key)
-        if curr and (curr.decode() if isinstance(curr, bytes) else curr) not in ("admitted", "queued"): return False
+        if curr and (curr.decode() if isinstance(curr, bytes) else curr) not in (
+            "admitted",
+            "queued",
+        ):
+            return False
         pipe = self._redis.pipeline()
         pipe.set(state_key, "scheduled", ex=RedisTTL.RUN_STATE)
-        pipe.hset(meta_key, mapping={
-            "run_id": run_id,
-            "tenant_id": tenant_id,
-            "agent_type": agent_type,
-            "worker_group": worker_group,
-            "shard": str(shard),
-            "reschedule_count": str(reschedule_count),
-            "admitted_at": str(admitted_at),
-            "scheduled_at": str(scheduled_at),
-            "queue_state": "scheduled",
-        })
+        pipe.hset(
+            meta_key,
+            mapping={
+                "run_id": run_id,
+                "tenant_id": tenant_id,
+                "agent_type": agent_type,
+                "worker_group": worker_group,
+                "shard": str(shard),
+                "reschedule_count": str(reschedule_count),
+                "admitted_at": str(admitted_at),
+                "scheduled_at": str(scheduled_at),
+                "queue_state": "scheduled",
+            },
+        )
         pipe.expire(meta_key, RedisTTL.RUN_META)
         pipe.zadd(running_zset, {run_id: scheduled_at})
         await pipe.execute()

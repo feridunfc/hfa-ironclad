@@ -216,7 +216,9 @@ class RecoveryService:
         await self._redis.hset(
             RedisKey.run_meta(run_id), "reschedule_count", str(new_count)
         )
-        await self._redis.set(RedisKey.run_state(run_id), "rescheduled", ex=RedisTTL.RUN_STATE)
+        await self._redis.set(
+            RedisKey.run_state(run_id), "rescheduled", ex=RedisTTL.RUN_STATE
+        )
 
         # Audit event
         resched_evt = RunRescheduledEvent(
@@ -346,7 +348,9 @@ class RecoveryService:
 
         # Reset state
         await self._redis.hset(RedisKey.run_meta(run_id), "reschedule_count", "0")
-        await self._redis.set(RedisKey.run_state(run_id), "admitted", ex=RedisTTL.RUN_STATE)
+        await self._redis.set(
+            RedisKey.run_state(run_id), "admitted", ex=RedisTTL.RUN_STATE
+        )
         await self._redis.zadd(self._config.running_zset, {run_id: time.time()})
 
         # Re-emit to Scheduler

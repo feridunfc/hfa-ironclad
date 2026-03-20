@@ -33,6 +33,7 @@ async def _make_lua(redis) -> SchedulerLua:
 
 def _score(priority: int = 5, now: float = 1000.0) -> float:
     from hfa_control.tenant_queue import MAX_PRIORITY
+
     ts_micros = int(now * 1_000_000) % int(1e12)
     return float((MAX_PRIORITY - priority) * int(1e12) + ts_micros)
 
@@ -47,9 +48,14 @@ async def test_enqueue_writes_queue_entry():
     redis = faredis.FakeRedis()
     lua = await _make_lua(redis)
     await lua.enqueue_admitted(
-        run_id="run-001", tenant_id="acme", agent_type="coder",
-        priority=5, preferred_region="", preferred_placement="LEAST_LOADED",
-        admitted_at=1000.0, score=_score(5, 1000.0),
+        run_id="run-001",
+        tenant_id="acme",
+        agent_type="coder",
+        priority=5,
+        preferred_region="",
+        preferred_placement="LEAST_LOADED",
+        admitted_at=1000.0,
+        score=_score(5, 1000.0),
     )
     count = await redis.zcard(RedisKey.tenant_queue("acme"))
     assert count == 1
@@ -60,9 +66,14 @@ async def test_enqueue_writes_meta():
     redis = faredis.FakeRedis()
     lua = await _make_lua(redis)
     await lua.enqueue_admitted(
-        run_id="run-002", tenant_id="acme", agent_type="researcher",
-        priority=3, preferred_region="eu-west", preferred_placement="REGION_AFFINITY",
-        admitted_at=2000.0, score=_score(3, 2000.0),
+        run_id="run-002",
+        tenant_id="acme",
+        agent_type="researcher",
+        priority=3,
+        preferred_region="eu-west",
+        preferred_placement="REGION_AFFINITY",
+        admitted_at=2000.0,
+        score=_score(3, 2000.0),
     )
     meta = await redis.hgetall(RedisKey.run_meta("run-002"))
     assert meta, "Meta must be written atomically with queue entry"
@@ -83,9 +94,14 @@ async def test_enqueue_sets_state_to_queued():
     redis = faredis.FakeRedis()
     lua = await _make_lua(redis)
     await lua.enqueue_admitted(
-        run_id="run-003", tenant_id="acme", agent_type="coder",
-        priority=5, preferred_region="", preferred_placement="LEAST_LOADED",
-        admitted_at=3000.0, score=_score(),
+        run_id="run-003",
+        tenant_id="acme",
+        agent_type="coder",
+        priority=5,
+        preferred_region="",
+        preferred_placement="LEAST_LOADED",
+        admitted_at=3000.0,
+        score=_score(),
     )
     state = await redis.get(RedisKey.run_state("run-003"))
     s = (state.decode() if isinstance(state, bytes) else state) or ""
@@ -97,9 +113,14 @@ async def test_enqueue_adds_to_active_tenant_set():
     redis = faredis.FakeRedis()
     lua = await _make_lua(redis)
     await lua.enqueue_admitted(
-        run_id="run-004", tenant_id="beta", agent_type="coder",
-        priority=5, preferred_region="", preferred_placement="LEAST_LOADED",
-        admitted_at=4000.0, score=_score(),
+        run_id="run-004",
+        tenant_id="beta",
+        agent_type="coder",
+        priority=5,
+        preferred_region="",
+        preferred_placement="LEAST_LOADED",
+        admitted_at=4000.0,
+        score=_score(),
     )
     members = await redis.smembers(RedisKey.tenant_active_set())
     decoded = {m.decode() if isinstance(m, bytes) else m for m in members}
@@ -117,15 +138,24 @@ async def test_enqueue_idempotent_same_run_id():
     lua = await _make_lua(redis)
 
     result1 = await lua.enqueue_admitted(
-        run_id="run-idem", tenant_id="acme", agent_type="coder",
-        priority=5, preferred_region="", preferred_placement="LEAST_LOADED",
-        admitted_at=1000.0, score=_score(),
+        run_id="run-idem",
+        tenant_id="acme",
+        agent_type="coder",
+        priority=5,
+        preferred_region="",
+        preferred_placement="LEAST_LOADED",
+        admitted_at=1000.0,
+        score=_score(),
     )
     result2 = await lua.enqueue_admitted(
-        run_id="run-idem", tenant_id="acme", agent_type="coder",
+        run_id="run-idem",
+        tenant_id="acme",
+        agent_type="coder",
         priority=1,  # even with different priority — NX ignores this
-        preferred_region="", preferred_placement="LEAST_LOADED",
-        admitted_at=1000.1, score=_score(1),
+        preferred_region="",
+        preferred_placement="LEAST_LOADED",
+        admitted_at=1000.1,
+        score=_score(1),
     )
 
     assert result1 is True
@@ -140,9 +170,14 @@ async def test_enqueue_returns_true_for_new_run():
     redis = faredis.FakeRedis()
     lua = await _make_lua(redis)
     result = await lua.enqueue_admitted(
-        run_id="run-new", tenant_id="acme", agent_type="coder",
-        priority=5, preferred_region="", preferred_placement="LEAST_LOADED",
-        admitted_at=1000.0, score=_score(),
+        run_id="run-new",
+        tenant_id="acme",
+        agent_type="coder",
+        priority=5,
+        preferred_region="",
+        preferred_placement="LEAST_LOADED",
+        admitted_at=1000.0,
+        score=_score(),
     )
     assert result is True
 
@@ -159,9 +194,14 @@ async def test_enqueue_multiple_runs_different_tenants():
 
     for i, tenant in enumerate(["acme", "beta", "gamma"]):
         await lua.enqueue_admitted(
-            run_id=f"run-{i:03d}", tenant_id=tenant, agent_type="coder",
-            priority=5, preferred_region="", preferred_placement="LEAST_LOADED",
-            admitted_at=float(i + 1000), score=_score(),
+            run_id=f"run-{i:03d}",
+            tenant_id=tenant,
+            agent_type="coder",
+            priority=5,
+            preferred_region="",
+            preferred_placement="LEAST_LOADED",
+            admitted_at=float(i + 1000),
+            score=_score(),
         )
 
     # Each tenant's queue is isolated

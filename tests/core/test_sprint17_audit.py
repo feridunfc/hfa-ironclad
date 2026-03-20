@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 import pytest
 import fakeredis.aioredis as faredis
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 from hfa_control.audit import AuditLogger, AuditEvent, build_audit_logger
 from hfa_control.audit_store import RedisLedgerStore
@@ -28,14 +28,14 @@ from hfa_control.audit_store import RedisLedgerStore
 
 
 def test_audit_event_constants_defined():
-    assert AuditEvent.ADMITTED      == "ADMITTED"
-    assert AuditEvent.REJECTED      == "REJECTED"
-    assert AuditEvent.SCHEDULED     == "SCHEDULED"
+    assert AuditEvent.ADMITTED == "ADMITTED"
+    assert AuditEvent.REJECTED == "REJECTED"
+    assert AuditEvent.SCHEDULED == "SCHEDULED"
     assert AuditEvent.DRAIN_STARTED == "DRAIN_STARTED"
-    assert AuditEvent.DLQ_REPLAY    == "DLQ_REPLAY"
-    assert AuditEvent.DLQ_DELETED   == "DLQ_DELETED"
-    assert AuditEvent.RESCHEDULE    == "RESCHEDULE"
-    assert AuditEvent.AUTH_FAILURE  == "AUTH_FAILURE"
+    assert AuditEvent.DLQ_REPLAY == "DLQ_REPLAY"
+    assert AuditEvent.DLQ_DELETED == "DLQ_DELETED"
+    assert AuditEvent.RESCHEDULE == "RESCHEDULE"
+    assert AuditEvent.AUTH_FAILURE == "AUTH_FAILURE"
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +105,7 @@ def test_build_audit_logger_disabled_when_no_key_id():
         os.environ.update(env_backup)
 
 
-def test_build_audit_logger_disabled_on_key_load_failure():
+def _old_test_build_audit_logger_disabled_on_key_load_failure():
     """Even with KEY_ID set, if key provider fails → disabled AuditLogger."""
     env_backup = os.environ.copy()
     os.environ["HFA_LEDGER_KEY_ID"] = "test-key"
@@ -182,6 +182,7 @@ async def test_admission_controller_audit_none_is_safe():
     ctrl = AdmissionController(redis, config, audit=None)
     assert ctrl._audit is None
 
+
 def test_build_audit_logger_disabled_on_key_load_failure():
     import os
     from unittest import mock
@@ -191,7 +192,10 @@ def test_build_audit_logger_disabled_on_key_load_failure():
     os.environ["HFA_LEDGER_KEY_ID"] = "test-key"
     try:
         # Sistemin çöküş senaryosunu test edebilmek için anahtar yükleyiciyi zorla patlatıyoruz (Mock)
-        with mock.patch("hfa.governance.signed_ledger_v1.Ed25519EnvKeyProvider", side_effect=Exception("Zorunlu Cokus")):
+        with mock.patch(
+            "hfa.governance.signed_ledger_v1.Ed25519EnvKeyProvider",
+            side_effect=Exception("Zorunlu Cokus"),
+        ):
             logger = build_audit_logger(redis=None)
 
         # Çöküş gerçekleştiğinde logger güvenli bir şekilde kendini kapatmalı
