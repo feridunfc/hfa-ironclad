@@ -1,30 +1,14 @@
-"""
-hfa-worker/src/hfa_worker/main.py
-IRONCLAD Sprint 12 — Worker Lifecycle Wiring
-
-Wires WorkerConsumer, WorkerHeartbeatPublisher, and DrainManager
-into a clean WorkerService with explicit lifecycle:
-
-    1. init config
-    2. start consumer  (registers consumer group, starts background tasks)
-    3. start heartbeat (publishes heartbeat every WORKER_HEARTBEAT_INTERVAL)
-    4. graceful_shutdown -> drain -> close consumer -> close heartbeat
-
-Sprint 9 main.py referenced ShardConsumer / HeartbeatPublisher (old names).
-This replaces it with the Sprint 11 class names without changing any
-external contracts.
-"""
-
 from __future__ import annotations
 
 import logging
 import os
 import uuid
-from typing import Dict
+from typing import Any, Dict
 
 from hfa_worker.consumer import WorkerConsumer
 from hfa_worker.drain import DrainManager
-from hfa_worker.executor import BaseExecutor, FakeExecutor
+from hfa_worker.executor import BaseExecutor
+from hfa_worker.executor_factory import build_executor
 from hfa_worker.heartbeat import WorkerHeartbeatPublisher
 
 logger = logging.getLogger(__name__)
@@ -38,26 +22,10 @@ def _require_env(name: str) -> str:
 
 
 class WorkerService:
-    """
-    Standalone worker service.
-
-    config keys (all optional with sane defaults):
-        worker_id       str     unique worker identifier
-        worker_group    str     scheduling group name
-        region          str     deployment region
-        version         str     build version
-        capabilities    list    agent_type capabilities
-        shards          list    shard numbers to consume
-        capacity        int     max concurrent runs
-        executor        BaseExecutor  injected executor (for tests)
-    """
-
-    def __init__(self, redis, config: Dict) -> None:
+    def __init__(self, redis, config: Dict[str, Any]) -> None:
         self._redis = redis
 
-        self._worker_id = str(
-            config.get("worker_id") or f"worker-{uuid.uuid4().hex[:8]}"
-        )
+        self._worker_id = str(config.get("worker_id") or f"worker-{uuid.uuid4().hex[:8]}")
         self._worker_group = str(config.get("worker_group") or "default-group")
         self._region = str(config.get("region") or "us-east-1")
         self._version = str(config.get("version") or "0.0.0")
@@ -65,7 +33,20 @@ class WorkerService:
         self._shards: list[int] = list(config.get("shards") or [0])
         self._capacity = int(config.get("capacity") or 10)
 
-        executor: BaseExecutor = config.get("executor") or FakeExecutor()
+        executor: BaseExecutor | None = config.get("executor")
+        if executor is None:
+            executor = build_executor(config)
+            logger.info(
+                "WorkerService executor built from factory: mode=%s worker=%s",
+                config.get("executor_mode", "fake"),
+                self._worker_id,
+            )
+        else:
+            logger.info(
+                "WorkerService using explicit executor: %s worker=%s",
+                type(executor).__name__,
+                self._worker_id,
+            )
 
         self._consumer = WorkerConsumer(
             redis=redis,
