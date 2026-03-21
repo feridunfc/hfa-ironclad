@@ -21,6 +21,8 @@ from typing import Optional
 from hfa.config.keys import RedisKey, RedisTTL
 from hfa.lua.loader import LuaScriptLoader
 
+from hfa_control.state_machine import validate_transition
+
 logger = logging.getLogger(__name__)
 
 # Paths relative to this package's repo location
@@ -139,27 +141,38 @@ class SchedulerLua:
         preferred_placement: str,
         admitted_at: float,
         score: float,
+        estimated_cost_cents: int = 0,
+        trace_parent: str = "",
+        trace_state: str = "",
+        payload_json: str = "",
+        max_inflight: int = 0,
+        inflight_ttl: int = 86400,
     ) -> bool:
         """
-        Atomically write:
+        Sprint 21: Atomically check+increment inflight AND enqueue in one Lua transaction.
+
+        Writes atomically:
           - tenant queue ZSET entry (NX)
-          - run meta HASH
-          - run state STRING = "queued"
+          - run meta HASH (ALL fields: routing + cost + trace)
+          - run payload STRING (if provided)
+          - run state STRING = "queued" (RunState.QUEUED)
           - active tenant SET membership
 
+        No separate non-atomic writes needed after this call.
         Returns True if newly enqueued, False if already present (idempotent).
-        Falls back to multi-step write if Lua not available.
         """
-        queue_key = RedisKey.tenant_queue(tenant_id)
-        meta_key = RedisKey.run_meta(run_id)
-        active_key = RedisKey.tenant_active_set()
-        state_key = RedisKey.run_state(run_id)
+        queue_key      = RedisKey.tenant_queue(tenant_id)
+        meta_key       = RedisKey.run_meta(run_id)
+        active_key     = RedisKey.tenant_active_set()
+        state_key      = RedisKey.run_state(run_id)
+        payload_key    = RedisKey.run_payload(run_id)
+        inflight_key   = RedisKey.tenant_inflight(tenant_id)
 
         if self._enqueue_loader is not None:
             try:
                 result = await self._enqueue_loader.run(
-                    num_keys=4,
-                    keys=[queue_key, meta_key, active_key, state_key],
+                    num_keys=6,
+                    keys=[queue_key, meta_key, active_key, state_key, payload_key, inflight_key],
                     args=[
                         score,
                         run_id,
@@ -169,25 +182,30 @@ class SchedulerLua:
                         preferred_region or "",
                         preferred_placement or "LEAST_LOADED",
                         str(admitted_at),
-                        RedisTTL.RUN_META,  # queue_ttl
-                        RedisTTL.RUN_META,  # meta_ttl
-                        RedisTTL.RUN_STATE,  # state_ttl
+                        RedisTTL.RUN_META,           # queue_ttl
+                        RedisTTL.RUN_META,           # meta_ttl
+                        RedisTTL.RUN_STATE,          # state_ttl
+                        str(estimated_cost_cents),   # ARGV[12]
+                        trace_parent or "",          # ARGV[13]
+                        trace_state or "",           # ARGV[14]
+                        payload_json or "",          # ARGV[15]
+                        str(max_inflight),           # ARGV[16]
+                        str(inflight_ttl),           # ARGV[17]
                     ],
                     fallback=lambda: self._enqueue_fallback(
-                        queue_key,
-                        meta_key,
-                        active_key,
-                        state_key,
-                        run_id,
-                        tenant_id,
-                        agent_type,
-                        priority,
-                        preferred_region,
-                        preferred_placement,
-                        admitted_at,
-                        score,
+                        queue_key, meta_key, active_key, state_key, payload_key,
+                        run_id, tenant_id, agent_type, priority,
+                        preferred_region, preferred_placement, admitted_at, score,
+                        estimated_cost_cents, trace_parent, trace_state, payload_json,
+                        max_inflight, inflight_ttl,
                     ),
                 )
+                if result == -1:
+                    logger.warning(
+                        "SchedulerLua.enqueue_admitted: inflight limit exceeded for run=%s",
+                        run_id,
+                    )
+                    return False  # rejected by Lua inflight gate
                 return bool(result)
             except Exception as exc:
                 logger.warning(
@@ -196,18 +214,11 @@ class SchedulerLua:
 
         # Direct fallback (fakeredis / Lua unavailable)
         return await self._enqueue_fallback(
-            queue_key,
-            meta_key,
-            active_key,
-            state_key,
-            run_id,
-            tenant_id,
-            agent_type,
-            priority,
-            preferred_region,
-            preferred_placement,
-            admitted_at,
-            score,
+            queue_key, meta_key, active_key, state_key, payload_key,
+            run_id, tenant_id, agent_type, priority,
+            preferred_region, preferred_placement, admitted_at, score,
+            estimated_cost_cents, trace_parent, trace_state, payload_json,
+            max_inflight, inflight_ttl,
         )
 
     async def _enqueue_fallback(
@@ -216,6 +227,7 @@ class SchedulerLua:
         meta_key: str,
         active_key: str,
         state_key: str,
+        payload_key: str,
         run_id: str,
         tenant_id: str,
         agent_type: str,
@@ -224,6 +236,12 @@ class SchedulerLua:
         preferred_placement: str,
         admitted_at: float,
         score: float,
+        estimated_cost_cents: int = 0,
+        trace_parent: str = "",
+        trace_state: str = "",
+        payload_json: str = "",
+        max_inflight: int = 0,
+        inflight_ttl: int = 86400,
     ) -> bool:
         """Non-atomic fallback for unit tests / Lua-unavailable environments."""
         pipe = self._redis.pipeline()
@@ -239,14 +257,18 @@ class SchedulerLua:
                 "preferred_placement": preferred_placement or "LEAST_LOADED",
                 "admitted_at": str(admitted_at),
                 "queue_state": "queued",
+                "estimated_cost_cents": str(estimated_cost_cents),
+                "trace_parent": trace_parent or "",
+                "trace_state": trace_state or "",
             },
         )
+        if payload_json:
+            pipe.set(payload_key, payload_json, ex=RedisTTL.RUN_META)
         pipe.set(state_key, "queued", ex=RedisTTL.RUN_STATE)
         pipe.sadd(active_key, tenant_id)
         pipe.expire(queue_key, RedisTTL.RUN_META)
         pipe.expire(meta_key, RedisTTL.RUN_META)
         results = await pipe.execute()
-        # results[0] = ZADD return: 1 if new, 0 if already existed
         return bool(results[0])
 
     # ------------------------------------------------------------------

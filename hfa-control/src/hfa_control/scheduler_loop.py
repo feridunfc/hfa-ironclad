@@ -9,6 +9,8 @@ from typing import Optional
 from hfa.config.keys import RedisKey, RedisTTL
 from hfa.events.codec import serialize_event
 from hfa.events.schema import RunAdmittedEvent, RunRequestedEvent, RunScheduledEvent
+from hfa_control.backpressure import BackpressureGuard
+from hfa_control.state_machine import validate_transition, is_terminal
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +79,35 @@ class SchedulerLoop:
         if not permit.allowed or permit.max_dispatches <= 0:
             return 0
         budget = min(budget, permit.max_dispatches)
+
+        # Backpressure evaluation before dispatch loop
+        bp_guard = BackpressureGuard(self._config)
+        try:
+            cap = await self._snapshot_builder.build_capacity_snapshot()
+            schedulable = [w for w in cap.workers if w.schedulable]
+            load_factors = [w.load_factor for w in schedulable]
+            capacities   = [w.capacity   for w in schedulable]
+            queue_depths = await self._tenant_queue.all_depths()
+            total_queued = sum(queue_depths.values())
+            total_capacity = sum(capacities)
+            global_inflight = total_capacity - cap.total_available_slots
+            bp = bp_guard.evaluate(
+                global_inflight=global_inflight,
+                total_capacity=total_capacity,
+                queue_depth=total_queued,
+                worker_load_factors=load_factors,
+                worker_capacities=capacities,
+                max_dispatches_requested=budget,
+            )
+            if bp.is_hard:
+                logger.info("Backpressure HARD active: %s — skipping cycle", bp.reason)
+                return 0
+            if bp.is_soft:
+                logger.debug("Backpressure SOFT: %s — budget %d→%d",
+                             bp.reason, budget, bp.allowed_dispatches)
+                budget = bp.allowed_dispatches
+        except Exception:
+            logger.debug("Backpressure evaluation error — proceeding", exc_info=True)
         failures = 0
         while dispatched < budget:
             elapsed_ms = (time.monotonic() - started) * 1000.0

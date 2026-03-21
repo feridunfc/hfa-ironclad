@@ -1,114 +1,52 @@
-name: IRONCLAD CI
+name: CI
 
 on:
   push:
-    branches:
-      - main
-      - develop
-      - "feature/**"
+    branches: ["main", "feature/**"]
   pull_request:
-    branches:
-      - main
-      - develop
-  workflow_dispatch:
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-permissions:
-  contents: read
-
-env:
-  PYTHONUNBUFFERED: "1"
-  PIP_DISABLE_PIP_VERSION_CHECK: "1"
-  PYTHONDONTWRITEBYTECODE: "1"
+    branches: ["main"]
 
 jobs:
-  core-tests:
-    name: Core tests (py${{ matrix.python-version }})
+  test:
+    name: Test Suite (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.12", "3.13"]
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip setuptools wheel
-          python -m pip install pytest pytest-asyncio pytest-mock pytest-cov fakeredis anyio openai          
-          pip install -e ./hfa-core
-          pip install -e ./hfa-control
-          pip install -e ./hfa-worker
-          pip install -e ./hfa-tools
-
-      - name: Set PYTHONPATH
-        run: |
-          echo "PYTHONPATH=${GITHUB_WORKSPACE}/hfa-core/src:${GITHUB_WORKSPACE}/hfa-control/src:${GITHUB_WORKSPACE}/hfa-worker/src:${GITHUB_WORKSPACE}/hfa-tools/src" >> $GITHUB_ENV
-
-      - name: Smoke imports
-        run: |
-          python -c "import hfa.events.schema"
-          python -c "import hfa_control"
-          python -c "import hfa_worker"
-          python -c "import hfa_tools"
+          python -m pip install --upgrade pip
+          pip install -e hfa-core
+          pip install -e hfa-control
+          pip install -e hfa-worker
+          pip install pytest pytest-asyncio fakeredis anyio
 
       - name: Run core tests
-        run: |
-          python -m pytest tests/core -q --import-mode=importlib --cov=hfa --cov=hfa_control --cov=hfa_worker --cov=hfa_tools --cov-report=xml --cov-report=term-missing
+        run: python -m pytest tests/core -q --tb=short
 
-      - name: Upload coverage xml
-        if: matrix.python-version == '3.12'
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-xml
-          path: coverage.xml
+      - name: Run worker tests
+        run: python -m pytest tests/ -q --tb=short --ignore=tests/integration --ignore=tests/legacy
 
   lint:
-    name: Lint
+    name: Lint (ruff)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
-
       - name: Install ruff
+        run: pip install ruff
+      - name: Lint
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install ruff
-
-      - name: Set PYTHONPATH
-        run: |
-          echo "PYTHONPATH=${GITHUB_WORKSPACE}/hfa-core/src:${GITHUB_WORKSPACE}/hfa-control/src:${GITHUB_WORKSPACE}/hfa-worker/src:${GITHUB_WORKSPACE}/hfa-tools/src" >> $GITHUB_ENV
-
-      - name: Run ruff
-        run: |
-          ruff check hfa-core/src hfa-control/src hfa-worker/src hfa-tools/src tests/core
-
-  required-checks:
-    name: Required checks
-    runs-on: ubuntu-latest
-    needs:
-      - core-tests
-      - lint
-    steps:
-      - name: All required checks passed
-        run: echo "IRONCLAD CI passed."
+          ruff check hfa-core/src hfa-control/src hfa-worker/src

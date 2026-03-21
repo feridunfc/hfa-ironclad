@@ -370,3 +370,14 @@ class WorkerRegistry:
                 return True
 
         return False
+
+    async def list_all_workers(self, region=None):
+        workers = await self._load_all_worker_profiles_somehow()
+
+        if region:
+            workers = [
+                w for w in workers
+                if str(getattr(w, "region", "")).strip() == region
+            ]
+
+        return workers
