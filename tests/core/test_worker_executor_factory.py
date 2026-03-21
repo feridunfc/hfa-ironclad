@@ -4,18 +4,19 @@ from hfa_worker.executor_factory import build_executor
 from hfa_worker.fake_executor import FakeExecutor
 
 
-class ObjConfig:
-    executor_mode = "fake"
-
-
 def test_factory_returns_fake_executor_for_dict_config():
-    assert isinstance(build_executor({"executor_mode": "fake"}), FakeExecutor)
+    executor = build_executor({"executor_mode": "fake"})
+    assert isinstance(executor, FakeExecutor)
 
 
 def test_factory_returns_fake_executor_for_object_config():
-    assert isinstance(build_executor(ObjConfig()), FakeExecutor)
+    class Config:
+        executor_mode = "fake"
+
+    executor = build_executor(Config())
+    assert isinstance(executor, FakeExecutor)
 
 
 def test_factory_raises_on_invalid_mode():
     with pytest.raises(ValueError, match="Unsupported executor_mode"):
-        build_executor({"executor_mode": "openai"})
+        build_executor({"executor_mode": "bogus"})
