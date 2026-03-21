@@ -1,22 +1,3 @@
-"""
-hfa-worker/src/hfa_worker/consumer.py
-IRONCLAD Sprint 11/12 — Real Execution Path with Observability
-
-Sprint 11 semantics preserved:
-  - CONSUMER_GROUP = "worker_consumers"  (unchanged)
-  - terminal failure  => failed + result + ACK
-  - infrastructure failure => no ACK, claim released
-  - success => done + result + ACK
-  - pending resume via XPENDING / XCLAIM
-
-Sprint 12 additions:
-  - IRONCLADMetrics instrumentation throughout
-  - close() uses asyncio.gather (no task leak)
-  - _claim_renewer logs and counts successes/failures
-  - _reclaim_pending_messages counts reclaimed messages
-  - _process_message records execution duration
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -24,15 +5,20 @@ import logging
 import time
 from typing import Optional, Set
 
+from hfa.config.keys import RedisKey
 from hfa.events.codec import deserialize_run_requested, serialize_event
 from hfa.events.schema import RunCompletedEvent, RunFailedEvent
-from hfa.config.keys import RedisKey
 from hfa.runtime.state_store import StateStore
+from hfa.runtime.tenant_utils import decrement_tenant_inflight_if_needed
+from hfa_worker.execution_types import (
+    ExecutionPermanentError,
+    ExecutionRequest,
+    ExecutionTransientError,
+)
 from hfa_worker.executor import BaseExecutor
 from hfa_worker.idempotency import IdempotencyGuard
 from hfa_worker.models import InfrastructureError, TerminalExecutionError
 from hfa_worker.redis_utils import ack_message, ensure_consumer_group
-from hfa.runtime.tenant_utils import decrement_tenant_inflight_if_needed
 
 try:
     from hfa.obs.runtime_metrics import IRONCLADMetrics as _M
@@ -108,10 +94,6 @@ class WorkerConsumer:
         )
 
     async def close(self) -> None:
-        """
-        Graceful shutdown — cancel both background tasks and await
-        them via gather so neither leaks.
-        """
         self._running = False
         self._pulling = False
 
@@ -201,9 +183,7 @@ class WorkerConsumer:
                 )
 
                 for msg_id, data in claimed:
-                    msg_id_str = (
-                        msg_id.decode() if isinstance(msg_id, bytes) else msg_id
-                    )
+                    msg_id_str = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
                     shard = int(stream.split(":")[-1])
                     logger.info(
                         "Reclaimed pending message: worker=%s stream=%s msg_id=%s",
@@ -237,17 +217,11 @@ class WorkerConsumer:
                     continue
 
                 for stream_name, entries in msgs:
-                    s_name = (
-                        stream_name.decode()
-                        if isinstance(stream_name, bytes)
-                        else stream_name
-                    )
+                    s_name = stream_name.decode() if isinstance(stream_name, bytes) else stream_name
                     shard = int(s_name.split(":")[-1])
 
                     for msg_id, data in entries:
-                        msg_id_str = (
-                            msg_id.decode() if isinstance(msg_id, bytes) else msg_id
-                        )
+                        msg_id_str = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
                         await self._process_message(msg_id_str, data, s_name, shard)
 
             except asyncio.CancelledError:
@@ -256,9 +230,17 @@ class WorkerConsumer:
                 logger.error("Consume loop error: %s", exc)
                 await asyncio.sleep(0.1)
 
-    async def _process_message(
-        self, msg_id: str, data: dict, stream: str, shard: int
-    ) -> None:
+    def _build_execution_request(self, event) -> ExecutionRequest:
+        return ExecutionRequest(
+            run_id=event.run_id,
+            tenant_id=event.tenant_id,
+            agent_type=event.agent_type,
+            payload=event.payload or {},
+            trace_parent=getattr(event, "trace_parent", None),
+            trace_state=getattr(event, "trace_state", None),
+        )
+
+    async def _process_message(self, msg_id: str, data: dict, stream: str, shard: int) -> None:
         try:
             event = deserialize_run_requested(data)
             if event is None:
@@ -289,7 +271,8 @@ class WorkerConsumer:
             exec_start = time.monotonic()
 
             try:
-                result = await self._executor.execute(event)
+                request = self._build_execution_request(event)
+                result = await self._executor.execute(request)
                 duration_ms = (time.monotonic() - exec_start) * 1000.0
 
                 if result.status == "done":
@@ -343,9 +326,45 @@ class WorkerConsumer:
                 await self._state.mark_completed(event.run_id)
                 await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
 
+            except ExecutionPermanentError as exc:
+                duration_ms = (time.monotonic() - exec_start) * 1000.0
+                logger.warning("Permanent execution failure run=%s error=%s", event.run_id, exc)
+                await self._state.store_result(
+                    event.run_id,
+                    event.tenant_id,
+                    "failed",
+                    {},
+                    0,
+                    0,
+                    error=str(exc),
+                )
+                await self._state.transition_state(event.run_id, "failed")
+                await decrement_tenant_inflight_if_needed(self._redis, event.run_id)
+                evt = RunFailedEvent(
+                    run_id=event.run_id,
+                    tenant_id=event.tenant_id,
+                    worker_id=self._worker_id,
+                    error=str(exc),
+                    cost_cents=0,
+                    tokens_used=0,
+                    payload={},
+                )
+                await self._redis.xadd(RedisKey.stream_results(), serialize_event(evt))
+                await self._state.mark_completed(event.run_id)
+                await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
+                if _M:
+                    _M.runs_failed_total.inc()
+                    _M.run_execution_duration_ms.record(duration_ms)
+
+            except ExecutionTransientError as exc:
+                logger.warning("Transient execution failure run=%s error=%s", event.run_id, exc)
+                await self._state.release_claim(event.run_id)
+                if _M:
+                    _M.runs_infra_failed_total.inc()
+
             except TerminalExecutionError as exc:
                 duration_ms = (time.monotonic() - exec_start) * 1000.0
-                logger.warning("Terminal failure run=%s error=%s", event.run_id, exc)
+                logger.warning("Terminal failure (legacy) run=%s error=%s", event.run_id, exc)
                 await self._state.store_result(
                     event.run_id,
                     event.tenant_id,
@@ -368,36 +387,26 @@ class WorkerConsumer:
                 await self._redis.xadd(RedisKey.stream_results(), serialize_event(evt))
                 await self._state.mark_completed(event.run_id)
                 await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
-
                 if _M:
                     _M.runs_failed_total.inc()
                     _M.run_execution_duration_ms.record(duration_ms)
 
             except InfrastructureError as exc:
-                logger.warning(
-                    "Infrastructure crash run=%s error=%s", event.run_id, exc
-                )
+                logger.warning("Infrastructure crash (legacy) run=%s error=%s", event.run_id, exc)
                 await self._state.release_claim(event.run_id)
                 if _M:
                     _M.runs_infra_failed_total.inc()
-                # no ACK, no terminal state — retry path
 
             except Exception as exc:
                 logger.error(
-                    "Unexpected infra crash run=%s error=%s",
+                    "Unexpected execution crash run=%s error=%s",
                     event.run_id,
                     exc,
                     exc_info=True,
                 )
                 await self._state.release_claim(event.run_id)
-
                 if _M:
                     _M.runs_infra_failed_total.inc()
-
-                # ❗ IMPORTANT:
-                # Do NOT decrement tenant inflight here.
-                # This is an infrastructure failure (retry path),
-                # not a terminal state.
 
             finally:
                 self._inflight.discard(event.run_id)

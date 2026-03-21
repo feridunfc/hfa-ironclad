@@ -12,6 +12,7 @@ dependencies = [
     "pydantic>=2.0",
     "hfa-core",
     "hfa-control",
+    "openai>=1.14.0",
 ]
 
 [project.optional-dependencies]
