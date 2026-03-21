@@ -1,3 +1,4 @@
+(.venv) PS C:\Users\user\PycharmProjects\IRONCLAD> Get-Content hfa-worker/pyproject.toml
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -34,3 +35,4 @@ exclude = [
   "archive_disabled",
   "tests/legacy",
 ]
+(.venv) PS C:\Users\user\PycharmProjects\IRONCLAD> 
