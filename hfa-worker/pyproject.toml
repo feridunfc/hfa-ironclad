@@ -1,4 +1,3 @@
-(.venv) PS C:\Users\user\PycharmProjects\IRONCLAD> Get-Content hfa-worker/pyproject.toml
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -13,6 +12,7 @@ dependencies = [
     "pydantic>=2.0",
     "hfa-core",
     "hfa-control",
+    "openai>=1.14.0",
 ]
 
 [project.optional-dependencies]
@@ -35,4 +35,3 @@ exclude = [
   "archive_disabled",
   "tests/legacy",
 ]
-(.venv) PS C:\Users\user\PycharmProjects\IRONCLAD> 
