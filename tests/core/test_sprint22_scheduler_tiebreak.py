@@ -1,6 +1,5 @@
 from types import SimpleNamespace
 
-import pytest
 
 from hfa_control.scheduler_types import SchedulingDecisionScore
 

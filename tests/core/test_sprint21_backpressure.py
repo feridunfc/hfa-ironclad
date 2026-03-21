@@ -2,7 +2,6 @@
 tests/core/test_sprint21_backpressure.py
 IRONCLAD Sprint 21 — Backpressure guard with hysteresis tests
 """
-import pytest
 from unittest.mock import MagicMock
 from hfa_control.backpressure import BackpressureGuard
 

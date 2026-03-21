@@ -21,7 +21,6 @@ from typing import Optional
 from hfa.config.keys import RedisKey, RedisTTL
 from hfa.lua.loader import LuaScriptLoader
 
-from hfa_control.state_machine import validate_transition
 
 logger = logging.getLogger(__name__)
 

@@ -44,14 +44,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import List, Optional
+from typing import Optional
 from hfa_control.scheduler_types import SchedulingDecisionScore
 from hfa.config.keys import RedisKey, RedisTTL
 from hfa.events.codec import serialize_event
 from hfa.events.schema import RunAdmittedEvent, RunRequestedEvent, RunScheduledEvent
 from hfa_control.exceptions import PlacementError
 from hfa_control.fairness import FairnessSelector
-from hfa_control.models import ControlPlaneConfig, WorkerProfile
+from hfa_control.models import ControlPlaneConfig
 from hfa_control.registry import WorkerRegistry
 from hfa_control.shard import ShardOwnershipManager
 from hfa_control.tenant_fairness import TenantFairnessTracker
@@ -61,7 +61,7 @@ from hfa_control.dispatch_controller import DispatchController
 from hfa_control.worker_scoring import WorkerScorer
 from hfa_control.scheduler_snapshot import SchedulerSnapshotBuilder
 from hfa_control.scheduler_loop import SchedulerLoop
-from hfa_control.state_machine import validate_transition, InvalidStateTransition, is_terminal, transition_state
+from hfa_control.state_machine import is_terminal
 
 try:
     from hfa.obs.runtime_metrics import IRONCLADMetrics as _M
@@ -620,7 +620,6 @@ class Scheduler:
         else:
             load_factor = (inflight / capacity) if capacity > 0 else 1.0
 
-        from hfa_control.scheduler_types import SchedulingDecisionScore
         return SchedulingDecisionScore(
             primary_score=primary_score,
             load_factor=load_factor,

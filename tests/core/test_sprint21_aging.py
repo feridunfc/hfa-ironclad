@@ -4,7 +4,6 @@ IRONCLAD Sprint 21 — Logarithmic capped aging tests
 """
 import math
 import time
-import pytest
 
 
 def _score(priority: int, admitted_at: float, age_weight: float, max_boost: int = 5) -> float:

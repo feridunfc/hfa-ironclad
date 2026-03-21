@@ -10,7 +10,6 @@ from hfa.config.keys import RedisKey, RedisTTL
 from hfa.events.codec import serialize_event
 from hfa.events.schema import RunAdmittedEvent, RunRequestedEvent, RunScheduledEvent
 from hfa_control.backpressure import BackpressureGuard
-from hfa_control.state_machine import validate_transition, is_terminal
 
 logger = logging.getLogger(__name__)
 
