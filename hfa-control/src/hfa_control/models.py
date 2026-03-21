@@ -22,6 +22,7 @@ class WorkerStatus(str, Enum):
 
 class RunState(str, Enum):
     ADMITTED = "admitted"
+    QUEUED = "queued"        # Sprint 18: in per-tenant fair queue, awaiting dispatch
     SCHEDULED = "scheduled"
     RUNNING = "running"
     DONE = "done"
@@ -146,3 +147,14 @@ class ControlPlaneConfig:
     worker_score_saturation_weight: float = 1.5
     worker_score_affinity_bonus: float = 0.5
     worker_score_capability_bonus: float = 0.75
+
+    # Sprint 21: starvation prevention (logarithmic capped aging)
+    scheduler_age_weight: float = 0.0         # 0 = disabled; e.g. 1.0 = mild aging
+    scheduler_age_max_boost: int = 5           # max priority-bands a job can jump via aging
+
+    # Sprint 21: backpressure (all 0 = disabled, opt-in)
+    backpressure_hard_inflight_cap: int = 0   # absolute hard stop
+    backpressure_soft_inflight_cap: int = 0   # soft throttle entry threshold
+    backpressure_hysteresis_ratio: float = 0.8 # soft_low = soft_high * ratio
+    backpressure_max_queue_ratio: float = 10.0 # queue_depth > ratio * capacity → soft
+    backpressure_worker_saturation: float = 0.95  # weighted load threshold for hard stop

@@ -11,10 +11,10 @@ Each tenant has a Redis ZSET acting as a priority queue.
     score  = priority_score  (lower = higher priority)
 
 Priority score formula:
-  score = (MAX_PRIORITY - priority) * 1e12 + admitted_at_micros
+  score = priority * 1e12 + admitted_at_micros
 
 This ensures:
-  1. Higher priority runs (priority=1) always beat lower ones (priority=10).
+  1. Lower priority number = lower score = higher urgency. priority=1 is dispatched first.
   2. Within the same priority band, FIFO ordering by admission time.
 
 Active tenant tracking:
@@ -44,7 +44,7 @@ from hfa.config.keys import RedisKey
 
 logger = logging.getLogger(__name__)
 
-MAX_PRIORITY = 100  # priorities are 1–100; score inverts so 1 = lowest score
+MAX_PRIORITY = 100  # priorities are 1–100; priority=1 → lowest score → ZPOPMIN returns it first (highest urgency)
 QUEUE_IDLE_TTL = 86_400  # 24h TTL on idle queues
 
 
@@ -52,7 +52,7 @@ class TenantQueue:
     """
     Per-tenant run queue backed by Redis ZSET.
 
-    Score = (MAX_PRIORITY - priority) * 1e12 + admitted_at_micros
+    Score = priority * 1e12 + admitted_at_micros
     Lower score = higher urgency.
 
     Args:
