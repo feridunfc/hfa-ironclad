@@ -4,7 +4,8 @@ IRONCLAD Sprint 11 --- State Management Helpers (FINAL)
 """
 
 from __future__ import annotations
-
+# from hfa.config.keys import RedisTTL
+# from hfa.state import RunState  # Eklendi
 import json
 import logging
 import time
@@ -72,10 +73,47 @@ class StateStore:
         await self._redis.hset(key, mapping=mapping)
         await self._redis.expire(key, self.TTL)
 
-    async def transition_state(self, run_id: str, new_state: str) -> None:
-        await self._redis.set(self.STATE_KEY.format(run_id), new_state, ex=self.TTL)
-        await self.patch_run_meta(run_id, {"state": new_state})
-        logger.debug("State transition: run=%s -> %s", run_id, new_state)
+    async def transition_state(
+            self,
+            run_id: str,
+            new_state: str,
+            *,
+            expected_state: str | None = None,
+    ) -> bool:
+        """
+        Transition run state via the single authoritative CAS gateway (hfa.state).
+        """
+        from hfa.state import transition_state as _ts  # authority in hfa-core
+
+        # V22 AKILLI CAS: Eğer caller expected_state vermediyse ve bu bir giriş (admitted)
+        # işlemi değilse, mevcut durumu okuyup CAS kilidine besliyoruz.
+        actual_expected = expected_state
+        if actual_expected is None and new_state not in ("admitted", "queued"):
+            curr_val = await self.get_run_state(run_id)
+            actual_expected = curr_val
+
+        result = await _ts(
+            self._redis,
+            run_id,
+            new_state,
+            state_key=self.STATE_KEY.format(run_id),
+            state_ttl=self.TTL,
+            expected_state=actual_expected,
+        )
+
+        # result.ok özelliği varsa onu kullan, yoksa direkt boolean olarak değerlendir
+        is_ok = getattr(result, "ok", bool(result))
+
+        if is_ok:
+            await self.patch_run_meta(run_id, {"state": new_state})
+            logger.debug("StateStore.transition_state: run=%s → %s", run_id, new_state)
+        else:
+            reason = getattr(result, "reason", "unknown")
+            logger.warning(
+                "StateStore.transition_state CAS miss: run=%s %r reason=%s",
+                run_id, new_state, reason,
+            )
+        return is_ok
 
     async def store_result(
         self,
@@ -157,8 +195,14 @@ class StateStore:
                 "started_at": str(now),
             },
         )
-        await self.transition_state(run_id, "running")
+        # V22: Sadece 'scheduled' durumundaysa 'running' yapabiliriz.
+        success = await self.transition_state(run_id, "running", expected_state="scheduled")
+        if not success:
+            await self.release_claim(run_id)
+            return False
+
         await self._redis.zadd(self.RUNNING_ZSET, {run_id: now})
+        # await self._redis.zadd(self.RUNNING_ZSET, {run_id: now})
 
         logger.info(
             "Run marked running: %s worker=%s shard=%d", run_id, worker_id, shard

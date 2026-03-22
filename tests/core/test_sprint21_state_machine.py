@@ -73,45 +73,81 @@ def test_all_terminal_states_no_outgoing():
 
 # ── transition_state CAS ───────────────────────────────────────────────────
 
-@pytest.mark.asyncio
-async def test_transition_state_basic():
-    redis = faredis.FakeRedis()
-    key = RedisKey.run_state("run-cas-1")
-    await redis.set(key, "queued", ex=RedisTTL.RUN_STATE)
-    ok = await transition_state(redis, "run-cas-1", "scheduled", state_key=key)
-    assert ok is True
-    val = await redis.get(key)
-    assert (val.decode() if isinstance(val, bytes) else val) == "scheduled"
+    # ESKİ HALİ:
+    # ok = await transition_state(redis, "run-cas-1", "scheduled", state_key=key)
+    # assert ok is True
 
-@pytest.mark.asyncio
-async def test_transition_state_cas_mismatch():
-    redis = faredis.FakeRedis()
-    key = RedisKey.run_state("run-cas-2")
-    await redis.set(key, "running", ex=RedisTTL.RUN_STATE)
-    # Expect "queued" but current is "running"
-    ok = await transition_state(
-        redis, "run-cas-2", "scheduled",
-        state_key=key, expected_state="queued",
-    )
-    assert ok is False
-    val = await redis.get(key)
-    assert (val.decode() if isinstance(val, bytes) else val) == "running"  # unchanged
+    # YENİ HALİ (Şununla değiştir):
+    @pytest.mark.asyncio
+    async def test_transition_state_basic():
+        redis = faredis.FakeRedis()
+        key = RedisKey.run_state("run-cas-1")
+        await redis.set(key, "queued", ex=RedisTTL.RUN_STATE)
+
+        # V22 Lockdown: Mevcut durumu vermeden geçiş yapmak reddedilir (Güvenlik)
+        failed_result = await transition_state(redis, "run-cas-1", "scheduled", state_key=key)
+        assert failed_result.ok is False
+        assert failed_result.reason == "initial_write_blocked"
+
+        # V22 Lockdown: Geçerli expected_state verilirse kabul edilir
+        ok_result = await transition_state(redis, "run-cas-1", "scheduled", state_key=key, expected_state="queued")
+        assert ok_result.ok is True
+
 
 @pytest.mark.asyncio
 async def test_transition_state_terminal_blocked():
     redis = faredis.FakeRedis()
     key = RedisKey.run_state("run-cas-3")
     await redis.set(key, "done", ex=RedisTTL.RUN_STATE)
-    ok = await transition_state(redis, "run-cas-3", "running", state_key=key)
-    assert ok is False
+
+    # V22 Lockdown: Fonksiyon artık TransitionResult dönüyor ve
+    # expected_state verilmediği için terminal state'i ezip geçemiyor.
+    result = await transition_state(redis, "run-cas-3", "running", state_key=key)
+    assert result.ok is False
+    assert result.reason == "initial_write_blocked"
+
 
 @pytest.mark.asyncio
 async def test_transition_state_expected_match_succeeds():
     redis = faredis.FakeRedis()
     key = RedisKey.run_state("run-cas-4")
     await redis.set(key, "scheduled", ex=RedisTTL.RUN_STATE)
-    ok = await transition_state(
+
+    result = await transition_state(
         redis, "run-cas-4", "running",
         state_key=key, expected_state="scheduled",
     )
-    assert ok is True
+    # V22 Lockdown: Objenin 'ok' argümanını kontrol ediyoruz
+    assert result.ok is True
+    assert result.reason == "committed"
+
+
+@pytest.mark.asyncio
+async def test_transition_state_cas_mismatch():
+    redis = faredis.FakeRedis()
+    key = RedisKey.run_state("run-cas-2")
+    await redis.set(key, "running", ex=RedisTTL.RUN_STATE)
+
+    # Expect "queued" but current is "running"
+    result = await transition_state(
+        redis, "run-cas-2", "scheduled",
+        state_key=key, expected_state="queued",
+    )
+    # V22 Lockdown: Fonksiyon artık TransitionResult dönüyor
+    assert result.ok is False
+    assert result.reason == "cas_miss"
+
+
+@pytest.mark.asyncio
+async def test_transition_state_missing_key():
+    redis = faredis.FakeRedis()
+    key = RedisKey.run_state("run-cas-3")
+
+    # Key does not exist. We expect "queued".
+    result = await transition_state(
+        redis, "run-cas-3", "scheduled",
+        state_key=key, expected_state="queued",
+    )
+    # V22 Lockdown: Fonksiyon artık TransitionResult dönüyor
+    assert result.ok is False
+    assert result.reason == "cas_miss"

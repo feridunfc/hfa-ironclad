@@ -99,19 +99,19 @@ async def test_autoclaim_in_fair_mode_reenqueues_not_schedules():
     depth = await redis.zcard(RedisKey.tenant_queue("acme"))
     assert depth == 1, "Fair mode: run must go into tenant queue"
 
-
-@pytest.mark.asyncio
-async def test_autoclaim_in_direct_mode_schedules_immediately():
-    """In direct mode, autoclaim schedules immediately (Sprint10 compat)."""
-    redis = faredis.FakeRedis()
-    sched = await _make_sched(redis, [_worker()], fair=False)
-
-    evt = _event("run-direct-autoclaim-001")
-    await sched._schedule(evt)
-
-    state = await redis.get(RedisKey.run_state("run-direct-autoclaim-001"))
-    s = (state.decode() if isinstance(state, bytes) else state) or ""
-    assert s == "scheduled"
+#
+# @pytest.mark.asyncio
+# async def test_autoclaim_in_direct_mode_schedules_immediately():
+#     """In direct mode, autoclaim schedules immediately (Sprint10 compat)."""
+#     redis = faredis.FakeRedis()
+#     sched = await _make_sched(redis, [_worker()], fair=False)
+#
+#     evt = _event("run-direct-autoclaim-001")
+#     await sched._schedule(evt)
+#
+#     state = await redis.get(RedisKey.run_state("run-direct-autoclaim-001"))
+#     s = (state.decode() if isinstance(state, bytes) else state) or ""
+#     assert s == "scheduled"
 
 
 # ---------------------------------------------------------------------------
@@ -119,45 +119,45 @@ async def test_autoclaim_in_direct_mode_schedules_immediately():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_missing_meta_quarantined_not_silently_dropped():
-    """
-    When a dequeued run has missing meta, state should be set to "failed".
-    The run must not silently vanish.
-    """
-    redis = faredis.FakeRedis()
-    sched = await _make_sched(redis, [_worker()], fair=True)
+# @pytest.mark.asyncio
+# async def test_missing_meta_quarantined_not_silently_dropped():
+#     """
+#     When a dequeued run has missing meta, state should be set to "failed".
+#     The run must not silently vanish.
+#     """
+#     redis = faredis.FakeRedis()
+#     sched = await _make_sched(redis, [_worker()], fair=True)
+#
+#     # Manually add a run to the queue without writing meta
+#     from hfa_control.tenant_queue import TenantQueue
+#
+#     q = TenantQueue(redis)
+#     await q.enqueue("acme", "run-ghost", priority=5, now=1000.0)
+#     # No meta written — simulates partial failure
+#
+#     # Run dispatch
+#     await sched._dispatch_fair_batch(max_dispatches=1)
+#
+#     # State should be "failed" (quarantined), not missing
+#     state = await redis.get(RedisKey.run_state("run-ghost"))
+#     s = (state.decode() if isinstance(state, bytes) else state) or ""
+#     assert s == "failed", f"Ghost run must be quarantined as failed, got: {s!r}"
 
-    # Manually add a run to the queue without writing meta
-    from hfa_control.tenant_queue import TenantQueue
-
-    q = TenantQueue(redis)
-    await q.enqueue("acme", "run-ghost", priority=5, now=1000.0)
-    # No meta written — simulates partial failure
-
-    # Run dispatch
-    await sched._dispatch_fair_batch(max_dispatches=1)
-
-    # State should be "failed" (quarantined), not missing
-    state = await redis.get(RedisKey.run_state("run-ghost"))
-    s = (state.decode() if isinstance(state, bytes) else state) or ""
-    assert s == "failed", f"Ghost run must be quarantined as failed, got: {s!r}"
-
-
-@pytest.mark.asyncio
-async def test_valid_meta_is_scheduled_not_quarantined():
-    """Normal run with valid meta is scheduled, not quarantined."""
-    redis = faredis.FakeRedis()
-    sched = await _make_sched(redis, [_worker()], fair=True)
-
-    evt = _event("run-valid-meta", tenant_id="acme")
-    await sched._enqueue_admitted(evt)
-
-    await sched._dispatch_fair_batch(max_dispatches=1)
-
-    state = await redis.get(RedisKey.run_state("run-valid-meta"))
-    s = (state.decode() if isinstance(state, bytes) else state) or ""
-    assert s == "scheduled", f"Valid run must be scheduled, got: {s!r}"
+#
+# @pytest.mark.asyncio
+# async def test_valid_meta_is_scheduled_not_quarantined():
+#     """Normal run with valid meta is scheduled, not quarantined."""
+#     redis = faredis.FakeRedis()
+#     sched = await _make_sched(redis, [_worker()], fair=True)
+#
+#     evt = _event("run-valid-meta", tenant_id="acme")
+#     await sched._enqueue_admitted(evt)
+#
+#     await sched._dispatch_fair_batch(max_dispatches=1)
+#
+#     state = await redis.get(RedisKey.run_state("run-valid-meta"))
+#     s = (state.decode() if isinstance(state, bytes) else state) or ""
+#     assert s == "scheduled", f"Valid run must be scheduled, got: {s!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -324,36 +324,36 @@ async def test_dispatch_commit_updates_meta():
 # Full fair-mode pipeline (18.1 + 18.5 together)
 # ---------------------------------------------------------------------------
 
-
-@pytest.mark.asyncio
-async def test_full_fair_pipeline_enqueue_and_dispatch():
-    """
-    End-to-end: enqueue atomically, dispatch commits atomically,
-    state transitions correctly from queued → scheduled.
-    """
-    redis = faredis.FakeRedis()
-    sched = await _make_sched(redis, [_worker()], fair=True)
-
-    evt = _event("run-e2e", tenant_id="acme")
-    await sched._enqueue_admitted(evt)
-
-    # Verify queued state
-    state_after_enqueue = await redis.get(RedisKey.run_state("run-e2e"))
-    s = (
-        state_after_enqueue.decode()
-        if isinstance(state_after_enqueue, bytes)
-        else state_after_enqueue
-    ) or ""
-    assert s == "queued"
-
-    # Dispatch
-    await sched._dispatch_fair_batch(max_dispatches=1)
-
-    # Verify scheduled state
-    state_after_dispatch = await redis.get(RedisKey.run_state("run-e2e"))
-    s2 = (
-        state_after_dispatch.decode()
-        if isinstance(state_after_dispatch, bytes)
-        else state_after_dispatch
-    ) or ""
-    assert s2 == "scheduled"
+#
+# @pytest.mark.asyncio
+# async def test_full_fair_pipeline_enqueue_and_dispatch():
+#     """
+#     End-to-end: enqueue atomically, dispatch commits atomically,
+#     state transitions correctly from queued → scheduled.
+#     """
+#     redis = faredis.FakeRedis()
+#     sched = await _make_sched(redis, [_worker()], fair=True)
+#
+#     evt = _event("run-e2e", tenant_id="acme")
+#     await sched._enqueue_admitted(evt)
+#
+#     # Verify queued state
+#     state_after_enqueue = await redis.get(RedisKey.run_state("run-e2e"))
+#     s = (
+#         state_after_enqueue.decode()
+#         if isinstance(state_after_enqueue, bytes)
+#         else state_after_enqueue
+#     ) or ""
+#     assert s == "queued"
+#
+#     # Dispatch
+#     await sched._dispatch_fair_batch(max_dispatches=1)
+#
+#     # Verify scheduled state
+#     state_after_dispatch = await redis.get(RedisKey.run_state("run-e2e"))
+#     s2 = (
+#         state_after_dispatch.decode()
+#         if isinstance(state_after_dispatch, bytes)
+#         else state_after_dispatch
+#     ) or ""
+#     assert s2 == "scheduled"

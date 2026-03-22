@@ -61,7 +61,9 @@ from hfa_control.dispatch_controller import DispatchController
 from hfa_control.worker_scoring import WorkerScorer
 from hfa_control.scheduler_snapshot import SchedulerSnapshotBuilder
 from hfa_control.scheduler_loop import SchedulerLoop
-from hfa_control.state_machine import is_terminal
+from hfa_control.state_machine import (
+    validate_transition, InvalidStateTransition, is_terminal, transition_state
+)
 
 try:
     from hfa.obs.runtime_metrics import IRONCLADMetrics as _M
@@ -105,7 +107,7 @@ class Scheduler:
         self._tenant_queue = TenantQueue(redis)
 
         # Sprint 18: Lua atomic operations for enqueue + dispatch commit
-        self._lua = SchedulerLua(redis)
+        self._lua = SchedulerLua(redis, strict_cas_mode=getattr(config, "strict_cas_mode", False))
 
         # Sprint 19: global scheduler intelligence components (fair mode only)
         self._snapshot_builder = SchedulerSnapshotBuilder(
@@ -195,8 +197,8 @@ class Scheduler:
                                 # Sprint 16 fair mode: enqueue and let dispatch loop pick
                                 await self._enqueue_admitted(evt)
                             else:
-                                # Direct mode: schedule immediately (Sprint 10 behavior)
-                                await self._schedule(evt)
+                                # Direct mode: enqueue through SchedulerLoop (single authority)
+                                await self._enqueue_admitted(evt)
 
                         await self._redis.xack(
                             self._config.control_stream, _GROUP, msg_id
@@ -250,7 +252,8 @@ class Scheduler:
                                 evt.tenant_id,
                             )
                         else:
-                            await self._schedule(evt)
+                            # Autoclaim: enqueue through SchedulerLoop (single authority)
+                            await self._enqueue_admitted(evt)
 
                     await self._redis.xack(self._config.control_stream, _GROUP, msg_id)
         except Exception as exc:
@@ -331,321 +334,26 @@ class Scheduler:
             )
 
 
-    async def _dispatch_fair_batch(self, max_dispatches: int = 20) -> None:
-        """
-        Fair-mode dispatch loop.
-
-        Compatibility-preserving behavior:
-        - choose next tenant by vruntime over active tenants
-        - dequeue exactly one run at a time from that tenant
-        - rebuild event from run meta
-        - if state is missing, backfill "queued" precondition
-        - schedule through authoritative _schedule() path
-        - never charge fairness here directly; _schedule() owns post-success charge
-
-        This preserves Sprint 16/18 semantics while still allowing newer
-        SchedulerLoop-based intelligence to coexist elsewhere.
-        """
-        dispatched = 0
-
-        while dispatched < max_dispatches:
-            active = await self._tenant_queue.active_tenants()
-            if not active:
-                return
-
-            tenant_id = self._tenant_fairness.pick_next(active)
-
-            run_id = await self._tenant_queue.dequeue(tenant_id)
-            if not run_id:
-                # queue may have gone empty between active_tenants() and dequeue()
-                continue
-
-            evt = await self._rebuild_event_from_meta(run_id)
-            if evt is None:
-                # Ghost/missing-meta protection: quarantine explicitly, never silent drop.
-                await self._redis.set(
-                    RedisKey.run_state(run_id),
-                    "failed",
-                    ex=RedisTTL.RUN_STATE,
-                )
-                logger.error("Quarantined run %s: missing meta", run_id)
-                continue
-
-            try:
-                await self._schedule(evt)
-                dispatched += 1
-            except Exception:
-                # _schedule already logs and marks failed on PlacementError paths.
-                # Never update fairness on failure.
-                continue
-
-        if dispatched:
-            logger.debug("Fair dispatch: placed %d runs this cycle", dispatched)
-
-    async def _rebuild_event_from_meta(self, run_id: str) -> Optional[RunAdmittedEvent]:
-        """Reconstruct a RunAdmittedEvent from stored run meta (fair-mode only)."""
-        import json
-
-        raw = await self._redis.hgetall(RedisKey.run_meta(run_id))
-        if not raw:
-            return None
-
-        def _s(k: str) -> str:
-            v = raw.get(k.encode()) or raw.get(k)
-            return (v.decode() if isinstance(v, bytes) else v) or ""
-
-        def _f(k: str) -> float:
-            try:
-                return float(_s(k))
-            except (ValueError, TypeError):
-                return 0.0
-
-        payload: dict = {}
-        raw_payload = await self._redis.get(RedisKey.run_payload(run_id))
-        if raw_payload:
-            try:
-                payload = json.loads(raw_payload.decode() if isinstance(raw_payload, bytes) else raw_payload)
-            except Exception:
-                payload = {}
-
-        return RunAdmittedEvent(
-            run_id=run_id,
-            tenant_id=_s("tenant_id"),
-            agent_type=_s("agent_type"),
-            priority=int(_s("priority") or "5"),
-            preferred_region=_s("preferred_region"),
-            preferred_placement=_s("preferred_placement") or "LEAST_LOADED",
-            payload=payload,
-            estimated_cost_cents=int(_s("estimated_cost_cents") or "0"),
-            admitted_at=_f("admitted_at") or time.time(),
-            trace_parent=_s("trace_parent") or None,
-            trace_state=_s("trace_state") or None,
-        )
-
-    # ------------------------------------------------------------------
-    # Placement decision
-    # ------------------------------------------------------------------
-    async def _schedule(self, event: RunAdmittedEvent) -> None:
-        span = (
-            _tracer.start_as_current_span("hfa.scheduler.place")
-            if _tracer
-            else _noop_span()
-        )
-        with span as sp:
-            _set_attr(sp, "hfa.run_id", event.run_id)
-            _set_attr(sp, "hfa.tenant_id", event.tenant_id)
-
-            try:
-                policy = event.preferred_placement or "LEAST_LOADED"
-                worker_group = await self._select_worker_group(event, policy)
-                shard = await self._shards.shard_for_group(worker_group, event.run_id)
-                stream = RedisKey.stream_shard(shard)
-
-                admitted_at = float(
-                    getattr(event, "admitted_at", time.time()) or time.time()
-                )
-
-                # ------------------------------------------------------------------
-                # Sprint 18 compatibility fix (CRITICAL)
-                #
-                # dispatch_commit requires run_state in {"admitted", "queued"}.
-                # In direct-mode scheduling, _schedule() may be called without
-                # prior enqueue. We must establish minimal preconditions.
-                # ------------------------------------------------------------------
-                state_key = RedisKey.run_state(event.run_id)
-                current_state = await self._redis.get(state_key)
-                if isinstance(current_state, bytes):
-                    current_state = current_state.decode()
-
-                # State machine validation before dispatch
-                if current_state and is_terminal(current_state):
-                    logger.warning(
-                        "_schedule: run=%s already in terminal state=%r — skipping",
-                        event.run_id, current_state,
-                    )
-                    return
-
-                if not current_state:
-                    # Set minimal valid precondition
-                    await self._redis.set(
-                        state_key,
-                        "admitted",
-                        ex=RedisTTL.RUN_STATE,
-                    )
-
-                    meta_key = RedisKey.run_meta(event.run_id)
-                    await self._redis.hset(
-                        meta_key,
-                        mapping={
-                            "tenant_id": event.tenant_id,
-                            "agent_type": event.agent_type,
-                            "priority": str(event.priority),
-                            "preferred_region": event.preferred_region or "",
-                            "preferred_placement": event.preferred_placement or "LEAST_LOADED",
-                            "admitted_at": str(admitted_at),
-                        },
-                    )
-                    await self._redis.expire(meta_key, RedisTTL.RUN_META)
-
-                # ------------------------------------------------------------------
-                # Atomic dispatch commit (authoritative state transition)
-                # ------------------------------------------------------------------
-                committed = await self._lua.dispatch_commit(
-                    run_id=event.run_id,
-                    tenant_id=event.tenant_id,
-                    agent_type=event.agent_type,
-                    worker_group=worker_group,
-                    shard=shard,
-                    reschedule_count=0,
-                    admitted_at=admitted_at,
-                    running_zset=self._config.running_zset,
-                )
-
-                if not committed:
-                    logger.warning(
-                        "Dispatch commit rejected for run=%s — state conflict "
-                        "(double-dispatch or invalid transition prevented)",
-                        event.run_id,
-                    )
-                    return
-
-                # ------------------------------------------------------------------
-                # Emit scheduled event
-                # ------------------------------------------------------------------
-                sched_evt = RunScheduledEvent(
-                    run_id=event.run_id,
-                    tenant_id=event.tenant_id,
-                    agent_type=event.agent_type,
-                    worker_group=worker_group,
-                    shard=shard,
-                    policy=policy,
-                )
-                await self._redis.xadd(
-                    self._config.control_stream,
-                    serialize_event(sched_evt),
-                    maxlen=100_000,
-                    approximate=True,
-                )
-
-                # ------------------------------------------------------------------
-                # Forward to worker shard stream
-                # ------------------------------------------------------------------
-                run_evt = RunRequestedEvent(
-                    run_id=event.run_id,
-                    tenant_id=event.tenant_id,
-                    agent_type=event.agent_type,
-                    priority=event.priority,
-                    payload=event.payload,
-                    idempotency_key=event.run_id,
-                    trace_parent=event.trace_parent,
-                    trace_state=event.trace_state,
-                )
-                await self._redis.xadd(
-                    stream,
-                    serialize_event(run_evt),
-                    maxlen=50_000,
-                    approximate=True,
-                )
-
-                _set_attr(sp, "hfa.worker_group", worker_group)
-                _set_attr(sp, "hfa.shard", str(shard))
-                _set_attr(sp, "hfa.policy", policy)
-
-                # ------------------------------------------------------------------
-                # Fairness accounting (post-success only)
-                # ------------------------------------------------------------------
-                try:
-                    self._tenant_fairness.update_on_dispatch(
-                        event.tenant_id,
-                        cost=self._fairness_cost(event),
-                    )
-                except Exception:
-                    pass  # never block scheduling
-
-                logger.info(
-                    "Scheduled: run=%s group=%s shard=%d policy=%s",
-                    event.run_id,
-                    worker_group,
-                    shard,
-                    policy,
-                )
-
-            except PlacementError as exc:
-                logger.error("PlacementError: run=%s %s", event.run_id, exc)
-                if _M:
-                    _M.scheduling_failures_total.inc()
-                await self._redis.set(
-                    RedisKey.run_state(event.run_id),
-                    "failed",
-                    ex=RedisTTL.RUN_STATE,
-                )
-
-            except Exception as exc:
-                logger.error(
-                    "Scheduler._schedule error: run=%s %s",
-                    event.run_id,
-                    exc,
-                    exc_info=True,
-                )
-    # ------------------------------------------------------------------
-    # Fairness helpers
-    # ------------------------------------------------------------------
-
-    def _fairness_cost(self, event: RunAdmittedEvent) -> float:
-        """
-        Compute fairness accounting cost for a dispatched run.
-
-        Rules
-        -----
-        * If estimated_cost_cents is missing or <= 0: default to 1.0.
-        * Otherwise: cost_cents / 100, clamped to [1.0, 100.0].
-        * Ensures vruntime increments are bounded and comparable across tenants.
-        """
-        cost_cents = getattr(event, "estimated_cost_cents", 0) or 0
-        if cost_cents <= 0:
-            return 1.0
-        return max(1.0, min(float(cost_cents) / 100.0, 100.0))
-
-    # ------------------------------------------------------------------
-    # Policy implementations
-    # ------------------------------------------------------------------
-    def _build_worker_decision_score(self, worker, primary_score: int):
-        """Bir worker için deterministik sort key üretir. Legacy objeleri tolere eder."""
-        capacity = int(getattr(worker, "capacity", 0) or 0)
-        inflight = int(getattr(worker, "inflight", 0) or 0)
-
-        # V22 CONTRACT FIX: Legacy objelerde load_factor yoksa dinamik hesapla.
-        if hasattr(worker, "load_factor"):
-            load_factor = float(worker.load_factor)
-        else:
-            load_factor = (inflight / capacity) if capacity > 0 else 1.0
-
-        return SchedulingDecisionScore(
-            primary_score=primary_score,
-            load_factor=load_factor,
-            inflight=inflight,
-            capacity=capacity,
-            worker_group=str(getattr(worker, "worker_group", "")),
-            region=str(getattr(worker, "region", "")),
-            worker_id=str(getattr(worker, "worker_id", "")),
-        )
-
     def _pick_best_worker(self, workers: list, primary_scores_by_worker_id: dict[str, int]):
-        """Aday worker listesini mutlak deterministik kurallara göre sıralar."""
         candidates = []
 
         for worker in workers:
-            # V22 BACKWARD COMPATIBILITY FIX: Legacy objelerde schedulable alanı yoktur.
-            if not getattr(worker, "schedulable", True):
+            if not getattr(worker, "schedulable", False):
                 continue
 
             worker_id = str(getattr(worker, "worker_id", "")).strip()
             if not worker_id:
                 continue
 
-            primary_score = int(primary_scores_by_worker_id.get(worker_id, 0))
-            score_obj = self._build_worker_decision_score(worker, primary_score)
-
+            score_obj = SchedulingDecisionScore(
+                primary_score=int(primary_scores_by_worker_id.get(worker_id, 0)),
+                load_factor=float(getattr(worker, "load_factor", 1.0)),
+                inflight=int(getattr(worker, "inflight", 0)),
+                capacity=int(getattr(worker, "capacity", 0)),
+                worker_group=str(getattr(worker, "worker_group", "")).strip(),
+                region=str(getattr(worker, "region", "")).strip(),
+                worker_id=worker_id,
+            )
             candidates.append((score_obj, worker))
 
         if not candidates:
@@ -653,80 +361,6 @@ class Scheduler:
 
         candidates.sort(key=lambda item: item[0].as_sort_key())
         return candidates[0][1]
-
-    async def _select_worker_group(self, event: RunAdmittedEvent, policy: str) -> str:
-        """
-        Select a worker group through a single deterministic path.
-        """
-        workers = await self._registry.list_schedulable_workers(region=None)
-        if not workers:
-            raise PlacementError(
-                f"No schedulable workers available for run='{event.run_id}' "
-                f"region='{getattr(event, 'preferred_region', None)}' "
-                f"(draining_excluded=0)"
-            )
-
-        pool = list(workers)
-
-        if policy == "REGION_AFFINITY":
-            preferred_region = getattr(event, "preferred_region", None)
-            if preferred_region:
-                regional_pool = [w for w in pool if getattr(w, "region", None) == preferred_region]
-                if regional_pool:
-                    pool = regional_pool
-
-        elif policy == "CAPABILITY_MATCH":
-            required_agent = getattr(event, "agent_type", None)
-            if required_agent:
-                capable_pool = []
-                for worker in pool:
-                    capabilities = getattr(worker, "capabilities", None) or []
-                    agent_types = getattr(worker, "agent_types", None) or []
-
-                    capability_set = set()
-                    if isinstance(capabilities, (list, tuple, set)):
-                        capability_set.update(str(x) for x in capabilities if x)
-                    if isinstance(agent_types, (list, tuple, set)):
-                        capability_set.update(str(x) for x in agent_types if x)
-
-                    if required_agent in capability_set:
-                        capable_pool.append(worker)
-
-                if capable_pool:
-                    pool = capable_pool
-
-        elif policy == "ROUND_ROBIN":
-            # Round-Robin is handled securely as a deterministic fallback.
-            pass
-
-        if not pool:
-            raise PlacementError(
-                f"No schedulable workers available for run='{event.run_id}' "
-                f"region='{getattr(event, 'preferred_region', None)}' "
-                f"(draining_excluded=0)"
-            )
-
-        primary_scores_by_worker_id = {}
-        for worker in pool:
-            worker_id = str(getattr(worker, "worker_id", "")).strip()
-            if not worker_id:
-                continue
-
-            load_factor = float(getattr(worker, "load_factor", 1.0))
-            primary_scores_by_worker_id[worker_id] = int(load_factor * 1_000_000)
-
-        best = self._pick_best_worker(pool, primary_scores_by_worker_id)
-        if best is None:
-            raise PlacementError(
-                f"No schedulable workers available for run='{event.run_id}' "
-                f"region='{getattr(event, 'preferred_region', None)}' "
-                f"(draining_excluded=0)"
-            )
-
-        return str(best.worker_group)
-
-
-
 
 def _noop_span():
     class _S:
@@ -744,3 +378,30 @@ def _set_attr(span, key: str, value: str) -> None:
         span.set_attribute(key, value)
     except Exception:
         pass
+def _pick_best_worker(self, workers: list, primary_scores_by_worker_id: dict[str, int]):
+    candidates = []
+
+    for worker in workers:
+        if not getattr(worker, "schedulable", False):
+            continue
+
+        worker_id = str(getattr(worker, "worker_id", "")).strip()
+        if not worker_id:
+            continue
+
+        score_obj = SchedulingDecisionScore(
+            primary_score=int(primary_scores_by_worker_id.get(worker_id, 0)),
+            load_factor=float(getattr(worker, "load_factor", 1.0)),
+            inflight=int(getattr(worker, "inflight", 0)),
+            capacity=int(getattr(worker, "capacity", 0)),
+            worker_group=str(getattr(worker, "worker_group", "")).strip(),
+            region=str(getattr(worker, "region", "")).strip(),
+            worker_id=worker_id,
+        )
+        candidates.append((score_obj, worker))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0].as_sort_key())
+    return candidates[0][1]

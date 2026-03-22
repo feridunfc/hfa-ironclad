@@ -1,7 +1,9 @@
 """
 hfa-control/src/hfa_control/scheduler_snapshot.py
+
 IRONCLAD Sprint 22 (PR-1) — Canonical & Deterministic Scheduler Input
 """
+
 from __future__ import annotations
 
 import logging
@@ -79,10 +81,6 @@ def _safe_float(value: object, default: float = 0.0) -> float:
 
 
 def _normalize_worker_status(value: object) -> WorkerStatus:
-    import logging
-    logger = logging.getLogger(__name__)
-    from hfa_control.models import WorkerStatus
-
     if isinstance(value, WorkerStatus):
         return value
 
@@ -96,14 +94,13 @@ def _normalize_worker_status(value: object) -> WorkerStatus:
     try:
         return WorkerStatus(raw)
     except ValueError:
-        # V22 FAIL-CLOSED FIX: Bilinmeyen durumları (örn: 'offline') HEALTHY
-        # kabul etmek felakettir. Bunları her zaman sağlıksız kabul etmeliyiz.
-        logger.warning("Unknown worker status=%r; treating as DEAD (fail-closed)", value)
+        logger.warning(
+            "Unknown worker status=%r; treating as DEAD/draining (fail-closed)",
+            value,
+        )
         try:
             return WorkerStatus("dead")
         except ValueError:
-            # Eğer modelde 'dead' yoksa, scheduler'ın yine de bloklayacağı
-            # 'draining' (veya benzeri) bir duruma güvenle düş.
             return WorkerStatus("draining")
 
 
@@ -135,8 +132,7 @@ class SchedulerSnapshotBuilder:
         now = time.time()
 
         for tenant_id in tenant_ids:
-            depth = await self._tenant_queue.depth(tenant_id)
-            depth = max(0, _safe_int(depth, 0))
+            depth = max(0, _safe_int(await self._tenant_queue.depth(tenant_id), 0))
 
             if depth <= 0:
                 try:
@@ -186,45 +182,52 @@ class SchedulerSnapshotBuilder:
         return result
 
     async def build_capacity_snapshot(self) -> CapacitySnapshot:
-        # PR-1 core rule:
-        # Do NOT pre-filter in registry with "schedulable only" semantics.
-        # Scheduler must see the broad pool and decide blocked_reason itself.
+        # Important:
+        # scheduler must see the broad worker pool and derive blocked_reason itself.
         raw_workers = await self._registry.list_all_workers(region=None)
 
         worker_candidates: dict[str, list[WorkerSchedulingSnapshot]] = {}
 
-        for w in raw_workers:
-            worker_id = _clean_str(getattr(w, "worker_id", ""))
+        for worker in raw_workers:
+            worker_id = _clean_str(getattr(worker, "worker_id", ""))
             if not worker_id:
-                logger.warning("Skipping worker with empty worker_id: %r", w)
+                logger.warning("Skipping worker with empty worker_id: %r", worker)
                 continue
 
-            worker_group = _clean_str(getattr(w, "worker_group", ""))
-            region = _clean_str(getattr(w, "region", ""))
+            worker_group = _clean_str(getattr(worker, "worker_group", ""))
+            region = _clean_str(getattr(worker, "region", ""))
 
-            capacity = max(0, _safe_int(getattr(w, "capacity", 0), 0))
-            inflight = max(0, _safe_int(getattr(w, "inflight", 0), 0))
+            capacity = max(0, _safe_int(getattr(worker, "capacity", 0), 0))
+            inflight = max(0, _safe_int(getattr(worker, "inflight", 0), 0))
             available = max(0, capacity - inflight)
             load_factor = (inflight / capacity) if capacity > 0 else 1.0
 
             capabilities = _normalize_capabilities(
-                getattr(w, "capabilities", ()),
-                getattr(w, "agent_types", ()),
+                getattr(worker, "capabilities", ()),
+                getattr(worker, "agent_types", ()),
             )
 
-            status_enum = _normalize_worker_status(getattr(w, "status", WorkerStatus.HEALTHY))
+            status_enum = _normalize_worker_status(
+                getattr(worker, "status", WorkerStatus.HEALTHY)
+            )
             status_str = status_enum.value
 
             last_seen = _safe_float(
-                getattr(w, "last_heartbeat_at", getattr(w, "last_seen", 0.0)),
+                getattr(worker, "last_heartbeat_at", getattr(worker, "last_seen", 0.0)),
                 0.0,
             )
 
-            latency_ewma_ms = max(0.0, _safe_float(getattr(w, "latency_ewma_ms", 0.0), 0.0))
-            failure_penalty = max(0.0, _safe_float(getattr(w, "failure_penalty", 0.0), 0.0))
+            latency_ewma_ms = max(
+                0.0,
+                _safe_float(getattr(worker, "latency_ewma_ms", 0.0), 0.0),
+            )
+            failure_penalty = max(
+                0.0,
+                _safe_float(getattr(worker, "failure_penalty", 0.0), 0.0),
+            )
             dispatch_reject_penalty = max(
                 0.0,
-                _safe_float(getattr(w, "dispatch_reject_penalty", 0.0), 0.0),
+                _safe_float(getattr(worker, "dispatch_reject_penalty", 0.0), 0.0),
             )
 
             is_draining = status_enum == WorkerStatus.DRAINING
@@ -268,9 +271,6 @@ class SchedulerSnapshotBuilder:
         resolved_workers: list[WorkerSchedulingSnapshot] = []
 
         for worker_id, candidates in worker_candidates.items():
-            # Deterministic duplicate resolution:
-            # same worker_id appears multiple times -> pick canonical minimum
-            # and emit warning so data integrity issue is visible.
             if len(candidates) > 1:
                 logger.warning(
                     "Duplicate worker_id detected in scheduler snapshot: worker_id=%s count=%d",
@@ -278,20 +278,21 @@ class SchedulerSnapshotBuilder:
                     len(candidates),
                 )
 
+            # Deterministic duplicate resolution
             chosen = sorted(
                 candidates,
                 key=lambda x: (
                     x.worker_group,
                     x.region,
                     x.worker_id,
-                    x.last_seen,
-                    x.capacity,
-                    x.inflight,
+                    -x.last_seen,   # prefer freshest heartbeat
+                    -x.capacity,    # then stronger worker
+                    x.inflight,     # then lower inflight
                 ),
             )[0]
             resolved_workers.append(chosen)
 
-        # Strict deterministic topology ordering
+        # Canonical deterministic topology ordering
         resolved_workers.sort(
             key=lambda x: (
                 x.worker_group,
@@ -304,7 +305,7 @@ class SchedulerSnapshotBuilder:
 
         raw_limit = getattr(self._config, "scheduler_loop_max_dispatches", 32)
         cfg_limit = max(0, _safe_int(raw_limit, 32))
-        max_disp = min(total_slots, cfg_limit)
+        max_dispatches = min(total_slots, cfg_limit)
 
         return CapacitySnapshot(
             workers=tuple(resolved_workers),
@@ -312,5 +313,5 @@ class SchedulerSnapshotBuilder:
             dispatch_allowed=total_slots > 0,
             blocked_reason=None if total_slots > 0 else "worker_pool_empty",
             redis_degraded=False,
-            max_dispatches_this_cycle=max_disp,
+            max_dispatches_this_cycle=max_dispatches,
         )

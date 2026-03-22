@@ -48,6 +48,7 @@ from hfa.events.codec import serialize_event
 from hfa.config.keys import RedisKey, RedisTTL
 from hfa_control.models import ControlPlaneConfig
 from hfa_control.exceptions import DLQEntryNotFoundError, TenantMismatchError
+from hfa_control.state_machine import transition_state, is_terminal
 from hfa.runtime.tenant_utils import decrement_tenant_inflight_if_needed
 
 try:
@@ -216,9 +217,28 @@ class RecoveryService:
         await self._redis.hset(
             RedisKey.run_meta(run_id), "reschedule_count", str(new_count)
         )
-        await self._redis.set(
-            RedisKey.run_state(run_id), "rescheduled", ex=RedisTTL.RUN_STATE
+        # CAS: only reschedule if run is still running or scheduled
+        # (prevents zombie resurrection of already-done/cancelled runs)
+        state_key = RedisKey.run_state(run_id)
+        raw_state = await self._redis.get(state_key)
+        current = raw_state.decode() if isinstance(raw_state, bytes) else raw_state
+        if current not in ("running", "scheduled"):
+            logger.warning(
+                "Recovery._reschedule CAS miss: run=%s expected running/scheduled, got %r — skipping",
+                run_id, current,
+            )
+            return "skipped"
+        ok = await transition_state(
+            self._redis, run_id, "rescheduled",
+            state_key=state_key, state_ttl=RedisTTL.RUN_STATE,
+            expected_state=current,
         )
+        if not ok:
+            logger.warning(
+                "Recovery._reschedule CAS conflict: run=%s — another actor changed state, skipping",
+                run_id,
+            )
+            return "skipped"
 
         # Audit event
         resched_evt = RunRescheduledEvent(
@@ -268,11 +288,21 @@ class RecoveryService:
         reschedule_count: int,
         reason: str,
     ) -> str:
-        await self._redis.set(
-            RedisKey.run_state(run_id),
-            "dead_lettered",
-            ex=RedisTTL.DLQ_META,
-        )
+        # CAS: only dead-letter if not already terminal
+        _dl_key = RedisKey.run_state(run_id)
+        _raw = await self._redis.get(_dl_key)
+        _cur = _raw.decode() if isinstance(_raw, bytes) else _raw
+        if _cur not in ("running", "scheduled", "rescheduled"):
+            logger.warning(
+                "Recovery._dead_letter CAS skip: run=%s state=%r not actionable",
+                run_id, _cur,
+            )
+        else:
+            _dlr = await transition_state(
+                self._redis, run_id, "dead_lettered",
+                state_key=_dl_key, state_ttl=RedisTTL.DLQ_META,
+                expected_state=_cur,
+            )
         await self._redis.hset(
             RedisKey.cp_dlq_meta(run_id),
             mapping={
@@ -346,12 +376,33 @@ class RecoveryService:
             except json.JSONDecodeError:
                 pass
 
-        # Reset state
-        await self._redis.hset(RedisKey.run_meta(run_id), "reschedule_count", "0")
-        await self._redis.set(
-            RedisKey.run_state(run_id), "admitted", ex=RedisTTL.RUN_STATE
+        # Reset state via CAS (only valid from dead_lettered)
+
+
+            # MİMARİYE SADIK REPLAY: Terminal state'den geri dönülemez.
+            # Anahtar silinerek iş sıfırdan sisteme (admitted) alınır.
+                # MİMARİYE SADIK REPLAY:
+                # dead_lettered terminal bir durumdur ve CAS ile üzerinden geçilemez.
+                # Bu yüzden eski durumu tamamen silip, işi sıfırdan (expected_state=None) kabul ediyoruz.
+        _replay_key = RedisKey.run_state(run_id)
+        await self._redis.delete(_replay_key)
+
+        replay_ok = await transition_state(
+            self._redis, run_id, "admitted",
+            state_key=_replay_key, state_ttl=RedisTTL.RUN_STATE,
+            expected_state=None,
         )
-        await self._redis.zadd(self._config.running_zset, {run_id: time.time()})
+
+        if not replay_ok:
+            logger.warning(
+                "DLQ replay CAS miss: run=%s not in dead_lettered state — skipping",
+                run_id,
+            )
+            raise DLQEntryNotFoundError(f"DLQ run {run_id!r} could not be re-admitted")
+
+        await self._redis.hset(RedisKey.run_meta(run_id), "reschedule_count", "0")
+        # Note: do NOT add to running_zset here — run is admitted, not running.
+        # It will enter running_zset when the scheduler dispatches it.
 
         # Re-emit to Scheduler
         evt = RunAdmittedEvent(

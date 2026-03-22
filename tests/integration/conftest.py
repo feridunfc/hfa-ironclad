@@ -1,98 +1,131 @@
-"""
-tests/integration/conftest.py
-IRONCLAD Sprint 15 — Real Redis fixtures via Testcontainers
-
-Fixtures
---------
-redis_container  (session-scoped)  — single Redis container per test run
-real_redis       (function-scoped) — flushed client per test
-
-Usage
------
-    @pytest.mark.integration
-    @pytest.mark.asyncio
-    async def test_something(real_redis):
-        await real_redis.set("key", "value")
-        ...
-
-Running
--------
-    # Integration only
-    pytest tests/integration -q -m integration
-
-    # With full suite
-    pytest tests/ -q
-
-Requirements
-------------
-    pip install testcontainers redis
-
-CI notes
---------
-GitHub Actions provides Docker by default. The redis:7-alpine image is
-pulled on first run and cached. Integration tests add ~10–15s per suite run.
-
-Fakeredis vs real Redis
------------------------
-Unit tests in tests/core use fakeredis for speed. Integration tests here
-use a real Redis container to verify:
-  - Lua eval (EVALSHA) behavior for atomic rate limiting
-  - MULTI/EXEC transaction semantics
-  - TTL and EXPIRE precision
-  - XREADGROUP / XAUTOCLAIM stream semantics
-These cannot be reliably reproduced by fakeredis.
-"""
-
 from __future__ import annotations
+
+import os
+import subprocess
+import time
+import uuid
+from pathlib import Path
+from typing import Iterator
 
 import pytest
 import pytest_asyncio
-from redis.asyncio import Redis
+import redis.asyncio as redis
+
+COMPOSE_FILE = Path(__file__).resolve().parents[2] / "docker-compose.integration.yml"
+REDIS_URL = "redis://127.0.0.1:6389/0"
 
 
-# ---------------------------------------------------------------------------
-# Testcontainers Redis — session-scoped (one container for all integration tests)
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="session")
-def redis_container():
-    """
-    Start a Redis 7 Alpine container for the test session.
-    Requires: pip install testcontainers
-    """
-    try:
-        from testcontainers.redis import RedisContainer
-    except ImportError:
-        pytest.skip(
-            "testcontainers not installed. "
-            "Run: pip install testcontainers  to enable integration tests."
+def _run(cmd: list[str]) -> None:
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Command failed: {' '.join(cmd)}\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
         )
 
-    with RedisContainer("redis:7-alpine") as container:
-        yield container
+
+def _wait_for_redis(url: str, timeout_s: float = 30.0) -> None:
+    import asyncio
+
+    async def _ping_loop() -> None:
+        deadline = time.monotonic() + timeout_s
+        last_error: Exception | None = None
+
+        while time.monotonic() < deadline:
+            client = redis.from_url(url, decode_responses=True)
+            try:
+                pong = await client.ping()
+                if pong is True:
+                    await client.aclose()
+                    return
+            except Exception as exc:
+                last_error = exc
+            finally:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
+            await asyncio.sleep(0.25)
+
+        raise RuntimeError(
+            f"Redis did not become healthy in {timeout_s}s. "
+            f"last_error={last_error!r}"
+        )
+
+    import asyncio
+    asyncio.run(_ping_loop())
 
 
-# ---------------------------------------------------------------------------
-# Per-test Redis client — flushed between tests
-# ---------------------------------------------------------------------------
+@pytest.fixture(scope="session", autouse=True)
+def integration_redis_stack() -> Iterator[None]:
+    _run(["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "--remove-orphans"])
+    _wait_for_redis(REDIS_URL, timeout_s=30.0)
+
+    try:
+        yield
+    finally:
+        _run(["docker", "compose", "-f", str(COMPOSE_FILE), "down", "-v"])
+
+
+@pytest.fixture(scope="session", autouse=True)
+def strict_mode_env(integration_redis_stack: None) -> Iterator[None]:
+    old_redis_url = os.environ.get("REDIS_URL")
+    old_strict = os.environ.get("HFA_STRICT_CAS_MODE")
+    old_env = os.environ.get("APP_ENV")
+
+    os.environ["REDIS_URL"] = REDIS_URL
+    os.environ["HFA_STRICT_CAS_MODE"] = "1"
+    os.environ["APP_ENV"] = "test-integration"
+
+    try:
+        yield
+    finally:
+        if old_redis_url is None:
+            os.environ.pop("REDIS_URL", None)
+        else:
+            os.environ["REDIS_URL"] = old_redis_url
+
+        if old_strict is None:
+            os.environ.pop("HFA_STRICT_CAS_MODE", None)
+        else:
+            os.environ["HFA_STRICT_CAS_MODE"] = old_strict
+
+        if old_env is None:
+            os.environ.pop("APP_ENV", None)
+        else:
+            os.environ["APP_ENV"] = old_env
 
 
 @pytest_asyncio.fixture
-async def real_redis(redis_container):
-    """
-    Async Redis client connected to the test container.
-    Database is flushed after each test to ensure isolation.
-    """
-    client = Redis(
-        host=redis_container.get_container_host_ip(),
-        port=int(redis_container.get_exposed_port(6379)),
-        decode_responses=True,
-    )
-
+async def redis_client(integration_redis_stack: None, strict_mode_env: None):
+    client = redis.from_url(REDIS_URL, decode_responses=True)
     try:
-        await client.flushdb()
         yield client
     finally:
-        await client.flushdb()
-        await client.aclose()
+        try:
+            await client.aclose()
+        except AttributeError:
+            await client.close()
+
+
+@pytest_asyncio.fixture
+async def real_redis(redis_client):
+    return redis_client
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def flush_redis(redis_client):
+    await redis_client.flushdb()
+    yield
+    await redis_client.flushdb()
+
+
+@pytest.fixture
+def unique_ns() -> str:
+    return f"it:{uuid.uuid4().hex[:12]}"

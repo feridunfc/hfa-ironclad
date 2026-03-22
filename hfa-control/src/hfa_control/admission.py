@@ -50,6 +50,7 @@ except Exception:
     _tracer = None
     HFATracing = None  # type: ignore
 
+from hfa_control.state_machine import transition_state
 from hfa_control.exceptions import (
     AdmissionError,
     BudgetExceededError,
@@ -152,10 +153,14 @@ class AdmissionController:
         """
         run_id = request.run_id
 
-        await self._redis.set(
-            RedisKey.run_state(run_id),
+        # CAS: reject only if not already in a state
+        _rjr = await transition_state(
+            self._redis,
+            run_id,
             "rejected",
-            ex=RedisTTL.RUN_STATE,
+            state_key=RedisKey.run_state(run_id),
+            state_ttl=RedisTTL.RUN_STATE,
+            expected_state=None,
         )
         await self._redis.hset(
             RedisKey.run_meta(run_id),
@@ -305,16 +310,30 @@ class AdmissionController:
                 except Exception:
                     pass
 
+                # Gate first: state must be written before event is emitted
+                # Prevents duplicate-admission race: two concurrent requests
+                # for the same run_id — only the first gets admitted.
+                _adm_ok = await transition_state(
+                    self._redis,
+                    request.run_id,
+                    "admitted",
+                    state_key=RedisKey.run_state(request.run_id),
+                    state_ttl=RedisTTL.RUN_STATE,
+                    expected_state=None,
+                )
+                if not _adm_ok:
+                    logger.warning(
+                        "Admission duplicate ignored: run=%s state already set",
+                        request.run_id,
+                    )
+                    return False
+
+                # Emit event only after state is committed
                 await self._redis.xadd(
                     self._config.control_stream,
                     serialize_event(evt),
                     maxlen=100_000,
                     approximate=True,
-                )
-                await self._redis.set(
-                    RedisKey.run_state(request.run_id),
-                    "admitted",
-                    ex=RedisTTL.RUN_STATE,
                 )
 
                 logger.info(

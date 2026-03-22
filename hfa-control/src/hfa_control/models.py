@@ -135,6 +135,9 @@ class ControlPlaneConfig:
     scheduler_loop_idle_sleep_ms: int = 250
     scheduler_loop_error_sleep_ms: int = 1000
 
+    # Sprint 23: CAS-only enforcement (production should set True)
+    strict_cas_mode: bool = False
+
     # Sprint 19 dispatch pacing
     dispatch_tokens_capacity: int = 128
     dispatch_tokens_refill_per_sec: float = 32.0

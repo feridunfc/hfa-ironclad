@@ -7,8 +7,13 @@ from dataclasses import dataclass
 from typing import Optional
 
 from hfa.config.keys import RedisKey, RedisTTL
-from hfa.events.codec import serialize_event
-from hfa.events.schema import RunAdmittedEvent, RunRequestedEvent, RunScheduledEvent
+from hfa_control.scheduler_reasons import (
+    QUARANTINE_REASONS, REQUEUE_REASONS,
+    QUARANTINED_STATE_CONFLICT, QUARANTINED_ALREADY_RUNNING, QUARANTINED_ILLEGAL_TRANSITION,
+    STATE_CONFLICT, ALREADY_RUNNING, ILLEGAL_TRANSITION, INTERNAL_ERROR,
+)
+from hfa.state import InvalidStateTransition, get_run_state, transition_state
+from hfa.events.schema import RunAdmittedEvent
 from hfa_control.backpressure import BackpressureGuard
 
 logger = logging.getLogger(__name__)
@@ -207,6 +212,16 @@ class SchedulerLoop:
             reschedule_count=0,
             admitted_at=event.admitted_at,
             running_zset=self._config.running_zset,
+            priority=event.priority,
+            payload=event.payload,
+            trace_parent=event.trace_parent,
+            trace_state=event.trace_state,
+            policy=policy,
+            region=event.preferred_region or self._config.region,
+            control_stream=self._config.control_stream,
+            shard_stream=RedisKey.stream_shard(shard),
+            control_stream_maxlen=RedisTTL.STREAM_MAXLEN,
+            shard_stream_maxlen=RedisTTL.SHARD_MAXLEN,
         )
         if not commit_result.committed:
             await self._dispatch_controller.on_dispatch_failure(commit_result.status)
@@ -221,39 +236,20 @@ class SchedulerLoop:
                 return DispatchAttemptResult(False, f"{commit_result.status}_requeued", should_requeue=True)
             await self._dispatch_controller.refund(1)
             self._worker_scorer.observe_dispatch_failure(worker_group, commit_result.status)
+            # Explicit quarantine for non-transient failures — no silent drops
+            if commit_result.status in QUARANTINE_REASONS:
+                q_reason = (
+                    QUARANTINED_STATE_CONFLICT if commit_result.status == STATE_CONFLICT
+                    else QUARANTINED_ALREADY_RUNNING if commit_result.status == ALREADY_RUNNING
+                    else QUARANTINED_ILLEGAL_TRANSITION
+                )
+                await self._quarantine_run(
+                    event.tenant_id, event.run_id,
+                    reason=q_reason,
+                    stage="commit_dispatch",
+                )
+                return DispatchAttemptResult(False, q_reason)
             return DispatchAttemptResult(False, commit_result.status)
-
-        sched_evt = RunScheduledEvent(
-            run_id=event.run_id,
-            tenant_id=event.tenant_id,
-            agent_type=event.agent_type,
-            worker_group=worker_group,
-            shard=shard,
-            policy=policy,
-        )
-        await self._redis.xadd(
-            self._config.control_stream,
-            serialize_event(sched_evt),
-            maxlen=RedisTTL.STREAM_MAXLEN,
-            approximate=True,
-        )
-
-        run_evt = RunRequestedEvent(
-            run_id=event.run_id,
-            tenant_id=event.tenant_id,
-            agent_type=event.agent_type,
-            priority=event.priority,
-            payload=event.payload,
-            idempotency_key=event.run_id,
-            trace_parent=event.trace_parent,
-            trace_state=event.trace_state,
-        )
-        await self._redis.xadd(
-            RedisKey.stream_shard(shard),
-            serialize_event(run_evt),
-            maxlen=RedisTTL.SHARD_MAXLEN,
-            approximate=True,
-        )
 
         fairness_before = self._tenant_fairness.get(event.tenant_id)
         fairness_cost = self._fairness_cost(event)
@@ -309,25 +305,74 @@ class SchedulerLoop:
             trace_state=_s("trace_state") or None,
         )
 
+    async def _quarantine_run(
+            self,
+            tenant_id: str,
+            run_id: str,
+            *,
+            reason: str,
+            stage: str = "unknown",
+    ) -> None:
+        """
+        Explicit terminal quarantine for a run.
+        """
+        logger.error(
+            "SchedulerLoop: quarantining run=%s tenant=%s reason=%s stage=%s",
+            run_id, tenant_id, reason, stage,
+        )
+
+        current_state = await get_run_state(self._redis, run_id)
+
+        try:
+            _qr = await transition_state(
+                self._redis, run_id, "failed",
+                state_key=RedisKey.run_state(run_id),
+                state_ttl=RedisTTL.RUN_STATE,
+                expected_state=current_state
+            )
+            if not _qr:
+                logger.warning("SchedulerLoop._quarantine_run: transition_state skipped for run=%s (already terminal?)",
+                               run_id)
+        except InvalidStateTransition as e:
+            logger.warning("SchedulerLoop._quarantine_run: transition_state invalid for run=%s (%s)", run_id, e)
+
+        try:
+            await self._redis.hset(
+                RedisKey.run_meta(run_id),
+                mapping={
+                    "dispatch_failure_reason": reason,
+                    "dispatch_failure_stage": stage,
+                    "queue_action": "quarantined",
+                },
+            )
+        except Exception as meta_exc:
+            logger.warning("_quarantine_run meta write failed: run=%s %s", run_id, meta_exc)
+
     async def _quarantine_missing_meta(self, tenant_id: str, run_id: str) -> None:
-        await self._redis.hset(
-            RedisKey.run_meta(run_id),
-            mapping={
-                "tenant_id": tenant_id,
-                "quarantine_reason": "missing_meta",
-                "quarantined_at": str(time.time()),
-            },
+        """Backward-compat alias for missing-meta quarantine."""
+        await self._quarantine_run(
+            tenant_id, run_id,
+            reason="missing_meta_quarantined",
+            stage="meta_check",
         )
-        await self._redis.expire(RedisKey.run_meta(run_id), RedisTTL.RUN_META)
-        await self._redis.set(
-            RedisKey.run_state(run_id),
-            "failed",
-            ex=RedisTTL.RUN_STATE,
-        )
-        logger.error("Quarantined run %s: missing meta", run_id)
 
     def _fairness_cost(self, event: RunAdmittedEvent) -> float:
-        cost_cents = getattr(event, "estimated_cost_cents", 0) or 0
-        if cost_cents <= 0:
-            return 1.0
-        return max(1.0, min(float(cost_cents) / 100.0, 100.0))
+        """
+        Deterministic fairness cost function.
+
+        Must be:
+        - monotonic
+        - non-zero
+        - tenant comparable
+        """
+
+        try:
+            cost = float(event.estimated_cost_cents or 0)
+        except Exception:
+            cost = 0.0
+
+        # 🔒 fail-safe: never zero cost
+        if cost <= 0:
+            cost = 1.0
+
+        return cost
