@@ -12,12 +12,9 @@ fakeredis fallback path preserved for unit tests.
 """
 
 from __future__ import annotations
-
 import json
 import logging
-import os
 import time
-import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -88,15 +85,10 @@ class SchedulerLua:
     Then use enqueue_admitted() and dispatch_commit() in hot paths.
     """
 
-    def __init__(self, redis, *, strict_cas_mode: bool = False) -> None:
+    def __init__(self, redis) -> None:
         self._redis = redis
         self._enqueue_loader: Optional[LuaScriptLoader] = None
         self._commit_loader: Optional[LuaScriptLoader] = None
-        self._strict_cas_mode = strict_cas_mode
-
-    def _strict_mode_enabled(self) -> bool:
-        env = os.getenv("HFA_STRICT_CAS_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
-        return self._strict_cas_mode or env
 
     async def initialise(self) -> None:
         """Load both Lua scripts into Redis. Safe to call multiple times."""
@@ -105,8 +97,6 @@ class SchedulerLua:
             self._enqueue_loader = LuaScriptLoader(self._redis, enqueue_path)
             await self._enqueue_loader.load()
         except FileNotFoundError as exc:
-            if self._strict_mode_enabled():
-                raise RuntimeError(f"SchedulerLua strict CAS mode: missing enqueue_admitted.lua: {exc}") from exc
             logger.warning(
                 "SchedulerLua: enqueue_admitted.lua not found: %s — fallback active",
                 exc,
@@ -118,8 +108,6 @@ class SchedulerLua:
             self._commit_loader = LuaScriptLoader(self._redis, commit_path)
             await self._commit_loader.load()
         except FileNotFoundError as exc:
-            if self._strict_mode_enabled():
-                raise RuntimeError(f"SchedulerLua strict CAS mode: missing dispatch_commit.lua: {exc}") from exc
             logger.warning(
                 "SchedulerLua: dispatch_commit.lua not found: %s — fallback active", exc
             )
@@ -182,8 +170,6 @@ class SchedulerLua:
         inflight_key   = RedisKey.tenant_inflight(tenant_id)
 
         if self._enqueue_loader is not None:
-            if self._strict_mode_enabled() and not self._enqueue_loader.sha:
-                raise RuntimeError(f"SchedulerLua strict CAS mode: enqueue_admitted.lua not loaded for run={run_id}")
             try:
                 result = await self._enqueue_loader.run(
                     num_keys=6,
@@ -322,45 +308,37 @@ class SchedulerLua:
         return result.committed
 
     async def dispatch_commit_detailed(
-        self,
-        *,
-        run_id: str,
-        tenant_id: str,
-        agent_type: str,
-        worker_group: str,
-        shard: int,
-        reschedule_count: int = 0,
-        admitted_at: float,
-        running_zset: str,
-        priority: int = 5,
-        payload: Optional[dict] = None,
-        trace_parent: Optional[str] = None,
-        trace_state: Optional[str] = None,
-        policy: str = "LEAST_LOADED",
-        region: str = "",
-        control_stream: Optional[str] = None,
-        shard_stream: Optional[str] = None,
-        control_stream_maxlen: int = RedisTTL.STREAM_MAXLEN,
-        shard_stream_maxlen: int = RedisTTL.SHARD_MAXLEN,
-    ) -> DispatchCommitResult:
+            self,
+            *,
+            run_id: str,
+            tenant_id: str,
+            agent_type: str,
+            worker_group: str,
+            shard: int,
+            admitted_at: int,
+            running_zset: str,
+            reschedule_count: int = 0,
+            priority: int | None = None,
+            payload: dict | None = None,
+            trace_parent: str | None = None,
+            trace_state: str | None = None,
+            policy: str | None = None,
+            region: str | None = None,
+            control_stream: str | None = None,
+            shard_stream: str | None = None,
+    ):
         """
-        End-to-end atomic dispatch commit. In the Lua primary path this includes
-        state CAS, meta update, running_zset insert, and both XADD publishes.
+        Atomic dispatch commit with a structured status code.
         """
         state_key = RedisKey.run_state(run_id)
         meta_key = RedisKey.run_meta(run_id)
-        control_stream = control_stream or RedisKey.stream_control()
-        shard_stream = shard_stream or RedisKey.stream_shard(shard)
         now = time.time()
-        payload_json = json.dumps(payload or {}, separators=(",", ":"))
 
         if self._commit_loader is not None:
-            if self._strict_mode_enabled() and not self._commit_loader.sha:
-                raise RuntimeError(f"SchedulerLua strict CAS mode: dispatch_commit.lua not loaded for run={run_id}")
             try:
                 result = await self._commit_loader.run(
-                    num_keys=5,
-                    keys=[state_key, meta_key, running_zset, control_stream, shard_stream],
+                    num_keys=3,
+                    keys=[state_key, meta_key, running_zset],
                     args=[
                         run_id,
                         tenant_id,
@@ -370,21 +348,16 @@ class SchedulerLua:
                         str(reschedule_count),
                         str(admitted_at),
                         str(now),
-                        str(RedisTTL.RUN_STATE),
-                        str(RedisTTL.RUN_META),
-                        str(control_stream_maxlen),
-                        str(shard_stream_maxlen),
-                        str(priority),
-                        payload_json,
-                        run_id,
+                        RedisTTL.RUN_STATE,
+                        RedisTTL.RUN_META,
+                        str(priority or 0),
+                        json.dumps(payload or {}),
                         trace_parent or "",
                         trace_state or "",
-                        policy or "LEAST_LOADED",
+                        policy or "",
                         region or "",
-                        uuid.uuid4().hex,
-                        uuid.uuid4().hex,
-                        str(now),
-                        str(now),
+                        control_stream or "",
+                        shard_stream or "",
                     ],
                     fallback=lambda: self._commit_fallback(
                         state_key,
@@ -399,7 +372,7 @@ class SchedulerLua:
                         admitted_at,
                         now,
                         priority=priority,
-                        payload=payload or {},
+                        payload=payload,
                         trace_parent=trace_parent,
                         trace_state=trace_state,
                         policy=policy,
@@ -422,18 +395,9 @@ class SchedulerLua:
                     return DispatchCommitResult(DispatchCommitResult.SUCCESS, run_id)
                 return DispatchCommitResult(DispatchCommitResult.STATE_CONFLICT, run_id)
             except Exception as exc:
-                if self._strict_mode_enabled():
-                    raise RuntimeError(
-                        f"SchedulerLua strict CAS mode: atomic dispatch commit failed for run={run_id}: {exc}"
-                    ) from exc
                 logger.warning(
                     "SchedulerLua.dispatch_commit Lua failed: %s — using fallback", exc
                 )
-
-        if self._strict_mode_enabled():
-            raise RuntimeError(
-                f"SchedulerLua strict CAS mode: no Lua dispatch_commit loader available for run={run_id}"
-            )
 
         return await self._commit_fallback(
             state_key,
@@ -448,7 +412,7 @@ class SchedulerLua:
             admitted_at,
             now,
             priority=priority,
-            payload=payload or {},
+            payload=payload,
             trace_parent=trace_parent,
             trace_state=trace_state,
             policy=policy,
@@ -456,6 +420,140 @@ class SchedulerLua:
             control_stream=control_stream,
             shard_stream=shard_stream,
         )
+
+    async def _commit_fallback(
+            self,
+            state_key: str,
+            meta_key: str,
+            running_zset: str,
+            run_id: str,
+            tenant_id: str,
+            agent_type: str,
+            worker_group: str,
+            shard: int,
+            reschedule_count: int,
+            admitted_at: float,
+            scheduled_at: float,
+            *,
+            priority: int | None = None,
+            payload: dict | None = None,
+            trace_parent: str | None = None,
+            trace_state: str | None = None,
+            policy: str | None = None,
+            region: str | None = None,
+            control_stream: str | None = None,
+            shard_stream: str | None = None,
+    ) -> DispatchCommitResult:
+        """
+        Non-atomic fallback for Lua-unavailable environments (fakeredis/test).
+
+        Order: CAS first, side effects only after commit eligibility confirmed.
+        If CAS fails, no side effects are written.
+        """
+        logger.warning(
+            "SchedulerLua: Lua unavailable — using Python fallback commit (non-atomic). run=%s",
+            run_id,
+        )
+
+        curr = await self._redis.get(state_key)
+        curr_s = curr.decode() if isinstance(curr, bytes) else curr
+        if not curr_s:
+            return DispatchCommitResult(
+                DispatchCommitResult.STATE_CONFLICT,
+                run_id,
+                {"details": "missing_state"},
+            )
+        if curr_s not in ("admitted", "queued"):
+            status = (
+                DispatchCommitResult.ALREADY_RUNNING
+                if curr_s in ("scheduled", "running")
+                else DispatchCommitResult.ILLEGAL_TRANSITION
+            )
+            return DispatchCommitResult(status, run_id, {"details": curr_s})
+
+        from hfa.state import transition_state as _ts_state
+
+        cas_result = await _ts_state(
+            self._redis,
+            run_id,
+            "scheduled",
+            state_key=state_key,
+            state_ttl=RedisTTL.RUN_STATE,
+            expected_state=curr_s,
+        )
+        if not cas_result:
+            return DispatchCommitResult(
+                DispatchCommitResult.STATE_CONFLICT,
+                run_id,
+                {"details": f"cas_miss_from_{curr_s}"},
+            )
+
+        pipe = self._redis.pipeline()
+        pipe.hset(
+            meta_key,
+            mapping={
+                "run_id": run_id,
+                "tenant_id": tenant_id,
+                "agent_type": agent_type,
+                "worker_group": worker_group,
+                "shard": str(shard),
+                "reschedule_count": str(reschedule_count),
+                "admitted_at": str(admitted_at),
+                "scheduled_at": str(scheduled_at),
+                "queue_state": "scheduled",
+                "priority": str(priority or 0),
+                "payload_json": json.dumps(payload or {}),
+                "trace_parent": trace_parent or "",
+                "trace_state": trace_state or "",
+                "policy": policy or "",
+                "region": region or "",
+            },
+        )
+        pipe.expire(meta_key, RedisTTL.RUN_META)
+        pipe.zadd(running_zset, {run_id: scheduled_at})
+
+        if control_stream:
+            control_fields = {
+                "event_type": "RunScheduled",
+                "run_id": run_id,
+                "tenant_id": tenant_id,
+                "agent_type": agent_type,
+                "worker_group": worker_group,
+                "shard": str(shard),
+                "reschedule_count": str(reschedule_count),
+                "admitted_at": str(admitted_at),
+                "scheduled_at": str(scheduled_at),
+                "priority": str(priority or 0),
+                "payload_json": json.dumps(payload or {}),
+                "trace_parent": trace_parent or "",
+                "trace_state": trace_state or "",
+                "policy": policy or "",
+                "region": region or "",
+            }
+            pipe.xadd(control_stream, control_fields)
+
+        if shard_stream:
+            shard_fields = {
+                "event_type": "RunRequested",
+                "run_id": run_id,
+                "tenant_id": tenant_id,
+                "agent_type": agent_type,
+                "worker_group": worker_group,
+                "shard": str(shard),
+                "reschedule_count": str(reschedule_count),
+                "admitted_at": str(admitted_at),
+                "scheduled_at": str(scheduled_at),
+                "priority": str(priority or 0),
+                "payload_json": json.dumps(payload or {}),
+                "trace_parent": trace_parent or "",
+                "trace_state": trace_state or "",
+                "policy": policy or "",
+                "region": region or "",
+            }
+            pipe.xadd(shard_stream, shard_fields)
+
+        await pipe.execute()
+        return DispatchCommitResult(DispatchCommitResult.SUCCESS, run_id)
 
     async def _commit_fallback(
         self,
@@ -470,15 +568,6 @@ class SchedulerLua:
         reschedule_count: int,
         admitted_at: float,
         scheduled_at: float,
-        *,
-        priority: int = 5,
-        payload: Optional[dict] = None,
-        trace_parent: Optional[str] = None,
-        trace_state: Optional[str] = None,
-        policy: str = "LEAST_LOADED",
-        region: str = "",
-        control_stream: Optional[str] = None,
-        shard_stream: Optional[str] = None,
     ) -> DispatchCommitResult:
         """
         Non-atomic fallback for Lua-unavailable environments (fakeredis/test).
@@ -532,50 +621,11 @@ class SchedulerLua:
                 "admitted_at": str(admitted_at),
                 "scheduled_at": str(scheduled_at),
                 "queue_state": "scheduled",
+                "trace_parent": trace_parent or "",
+                "trace_state": trace_state or "",
             },
         )
         pipe.expire(meta_key, RedisTTL.RUN_META)
         pipe.zadd(running_zset, {run_id: scheduled_at})
         await pipe.execute()
-
-        control_stream = control_stream or RedisKey.stream_control()
-        shard_stream = shard_stream or RedisKey.stream_shard(shard)
-        await self._redis.xadd(
-            control_stream,
-            {
-                "event_id": uuid.uuid4().hex,
-                "timestamp": str(scheduled_at),
-                "trace_parent": trace_parent or "",
-                "trace_state": trace_state or "",
-                "event_type": "RunScheduled",
-                "run_id": run_id,
-                "tenant_id": tenant_id,
-                "agent_type": agent_type,
-                "worker_group": worker_group,
-                "shard": str(shard),
-                "region": region or "",
-                "policy": policy or "LEAST_LOADED",
-                "scheduled_at": str(scheduled_at),
-            },
-            maxlen=RedisTTL.STREAM_MAXLEN,
-            approximate=True,
-        )
-        await self._redis.xadd(
-            shard_stream,
-            {
-                "event_id": uuid.uuid4().hex,
-                "timestamp": str(scheduled_at),
-                "trace_parent": trace_parent or "",
-                "trace_state": trace_state or "",
-                "event_type": "RunRequested",
-                "run_id": run_id,
-                "tenant_id": tenant_id,
-                "agent_type": agent_type,
-                "priority": str(priority),
-                "payload": json.dumps(payload or {}, separators=(",", ":")),
-                "idempotency_key": run_id,
-            },
-            maxlen=RedisTTL.SHARD_MAXLEN,
-            approximate=True,
-        )
         return DispatchCommitResult(DispatchCommitResult.SUCCESS, run_id)
