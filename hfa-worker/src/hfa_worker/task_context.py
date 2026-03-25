@@ -16,3 +16,4 @@ class TaskContext:
     payload: dict[str, Any]
     trace_parent: str = ""
     trace_state: str = ""
+    required_capabilities: list[str] | None = None

@@ -1,9 +1,8 @@
+
 """
 hfa-core/src/hfa/state/__init__.py
-IRONCLAD Sprint 23 — Lua-backed atomic CAS state machine
 
-This module is the SINGLE authoritative gateway for all run lifecycle state
-writes. No caller may write hfa:run:state:{run_id} directly.
+Single authoritative state transition gateway.
 """
 from __future__ import annotations
 
@@ -27,7 +26,6 @@ VALID_TRANSITIONS: dict[str, frozenset[str]] = {
     "rejected": frozenset(),
     "dead_lettered": frozenset(),
 }
-
 TERMINAL_STATES: frozenset[str] = frozenset({"done", "failed", "rejected", "dead_lettered"})
 
 
@@ -56,7 +54,11 @@ class TransitionResult:
 
 
 def _strict_cas_mode() -> bool:
-    return os.getenv("HFA_STRICT_CAS_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
+    env_flag = os.getenv("HFA_STRICT_CAS_MODE", "").strip().lower()
+    if env_flag in {"1", "true", "yes", "on"}:
+        return True
+    app_env = (os.getenv("APP_ENV") or os.getenv("ENVIRONMENT") or "development").strip().lower()
+    return app_env in {"production", "staging"}
 
 
 def validate_transition(
@@ -130,9 +132,7 @@ async def _get_lua_loader(redis):
 
 
 async def get_run_state(redis, run_id: str, *, state_key: Optional[str] = None) -> Optional[str]:
-    from hfa.config.keys import RedisKey
-
-    raw = await redis.get(state_key or RedisKey.run_state(run_id))
+    raw = await redis.get(state_key or run_id)
     return raw.decode() if isinstance(raw, bytes) else raw
 
 
@@ -145,17 +145,27 @@ async def transition_state(
     state_ttl: int = 86400,
     expected_state: Optional[str] = None,
     raise_on_invalid: bool = False,
-) -> TransitionResult:
+):
     mode = "initial" if expected_state is None else "cas"
 
     loader = await _get_lua_loader(redis)
     if loader is not None:
         try:
-            result = await loader.run(
-                num_keys=1,
-                keys=[state_key],
-                args=[run_id, to_state, expected_state or "", str(state_ttl), mode],
-            )
+            runner = getattr(loader, "run", None)
+            if runner is None:
+                runner = loader.execute
+                result = await runner(
+                    script_name="state_transition",
+                    keys=[state_key],
+                    args=[run_id, to_state, expected_state or "", str(state_ttl), mode],
+                )
+            else:
+                result = await runner(
+                    num_keys=1,
+                    keys=[state_key],
+                    args=[run_id, to_state, expected_state or "", str(state_ttl), mode],
+                )
+
             if isinstance(result, (list, tuple)) and len(result) >= 2:
                 code = int(result[0])
                 prior_raw = result[1]
@@ -170,10 +180,12 @@ async def transition_state(
                 reason = TransitionResult.INITIAL_WRITE_BLOCKED if mode == "initial" else TransitionResult.CAS_MISS
                 return TransitionResult(False, reason, prior, to_state, run_id)
             if code == -1:
-                return TransitionResult(False, TransitionResult.ILLEGAL_TRANSITION, prior, to_state, run_id)
+                return TransitionResult(False, TransitionResult.INITIAL_WRITE_BLOCKED, prior, to_state, run_id)
             if code == -2:
-                return TransitionResult(False, TransitionResult.TERMINAL_BLOCKED, prior, to_state, run_id)
+                return TransitionResult(False, TransitionResult.ILLEGAL_TRANSITION, prior, to_state, run_id)
             if code == -3:
+                return TransitionResult(False, TransitionResult.TERMINAL_BLOCKED, prior, to_state, run_id)
+            if code == -4:
                 return TransitionResult(False, TransitionResult.UNKNOWN_STATE, prior, to_state, run_id)
             logger.warning("StateMachine Lua returned unexpected code=%r for run=%s", code, run_id)
         except Exception as exc:

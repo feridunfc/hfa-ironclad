@@ -1,193 +1,131 @@
-"""
-hfa-control/src/hfa_control/backpressure.py
-IRONCLAD Sprint 21 v3 — Backpressure guard with hysteresis
 
-Design
-------
-Prevents the scheduler from over-dispatching when the system is under load.
-Uses hysteresis bands to prevent oscillation (thrashing between stop/resume).
-
-Hysteresis model
-----------------
-                  hard_cap ──────────── STOP (hard)
-                  soft_high ─────────── SOFT THROTTLE (halve)
-                  soft_low ──────────── RESUME (exit throttle)
-                  (below soft_low)───── NORMAL
-
-This prevents the common failure mode of:
-  inflight=99 → resume → dispatch=100 → stop → ... (thrashing)
-
-Capacity-weighted evaluation
------------------------------
-Workers have different capacities. A fleet of 1 large worker + 100 tiny
-workers should not be treated the same as 101 medium workers.
-total_effective_capacity = sum(worker.capacity) not len(workers).
-
-IRONCLAD rules
---------------
-* Hard limits always stop dispatch immediately (no hysteresis).
-* Soft limits use hysteresis: enter at soft_high, exit at soft_low.
-* Reason codes are always emitted for observability.
-* Empty worker pool is not a backpressure condition (separate error).
-* All thresholds default to 0 = disabled (opt-in, backward compatible).
-"""
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
-from typing import Optional
-
-logger = logging.getLogger(__name__)
+from typing import Iterable
 
 
 @dataclass(frozen=True)
-class BackpressureSignal:
-    active: bool
-    reason: Optional[str]
-    allowed_dispatches: int
-    severity: str                # "none" | "soft" | "hard"
+class BackpressureDecision:
+    throttled: bool
+    reason: str | None
+    saturation: float
+    max_dispatches_allowed: int = 0
 
     @property
-    def is_hard(self) -> bool:
-        return self.severity == "hard"
+    def active(self) -> bool:
+        return self.throttled
 
     @property
     def is_soft(self) -> bool:
-        return self.severity == "soft"
+        return self.throttled and self.reason in {"soft_high", "soft_hysteresis"}
+
+    @property
+    def in_soft_throttle(self) -> bool:
+        return self.is_soft
+
+    @property
+    def hard_cap_reached(self) -> bool:
+        return self.reason == "hard_limit"
 
 
 class BackpressureGuard:
-    """
-    Evaluates system state and returns a dispatch limit per cycle.
+    """Persistent hysteresis guard.
 
-    Maintains internal hysteresis state to avoid oscillation.
+    Supports both newer compact calls:
+      evaluate(inflight=..., capacity=..., saturation=...)
+    and older audit-style calls:
+      evaluate(global_inflight=..., total_capacity=..., queue_depth=..., worker_load_factors=..., ...)
     """
 
     def __init__(self, config) -> None:
         self._config = config
-        self._in_soft_throttle = False  # hysteresis state
+        self._in_soft_throttle = False
+
+    def reset(self) -> None:
+        self._in_soft_throttle = False
+
+    @property
+    def is_soft_throttled(self) -> bool:
+        return self._in_soft_throttle
+
+    def _as_list(self, value) -> list[float]:
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple)):
+            return list(value)
+        return [float(value)]
 
     def evaluate(
         self,
         *,
-        global_inflight: int,
-        total_capacity: int,           # capacity-weighted sum
-        queue_depth: int,
-        worker_load_factors: list[float],
-        worker_capacities: Optional[list[int]] = None,  # per-worker capacity
-        max_dispatches_requested: int,
-    ) -> BackpressureSignal:
-        """
-        Evaluate backpressure conditions and return allowed dispatch count.
+        queued: int | None = None,
+        inflight: int | None = None,
+        capacity: int | None = None,
+        saturation: float | None = None,
+        global_inflight: int | None = None,
+        total_capacity: int | None = None,
+        queue_depth: int | None = None,
+        worker_load_factors: Iterable[float] | None = None,
+        worker_capacities: Iterable[int] | None = None,
+        max_dispatches_requested: int | None = None,
+    ) -> BackpressureDecision:
+        current_inflight = global_inflight if global_inflight is not None else inflight if inflight is not None else queued or 0
+        total_cap = total_capacity if total_capacity is not None else capacity if capacity is not None else 0
+        req = int(max_dispatches_requested or 0)
 
-        Args:
-            global_inflight:         Running runs across all workers.
-            total_capacity:          Sum of all schedulable worker capacities.
-            queue_depth:             Total queued runs (not yet dispatched).
-            worker_load_factors:     Per-worker load factor (inflight/capacity).
-            worker_capacities:       Per-worker capacity (for weighted saturation).
-            max_dispatches_requested: How many dispatches the loop wants.
+        if total_cap <= 0:
+            self._in_soft_throttle = True
+            return BackpressureDecision(True, "no_capacity", 1.0, 0)
 
-        Returns:
-            BackpressureSignal with allowed_dispatches and severity.
-        """
-        hard_cap         = int(getattr(self._config, "backpressure_hard_inflight_cap", 0) or 0)
-        soft_high        = int(getattr(self._config, "backpressure_soft_inflight_cap", 0) or 0)
-        soft_low_ratio   = float(getattr(self._config, "backpressure_hysteresis_ratio", 0.8) or 0.8)
-        max_queue_ratio  = float(getattr(self._config, "backpressure_max_queue_ratio", 10.0) or 10.0)
-        sat_threshold    = float(getattr(self._config, "backpressure_worker_saturation", 0.95) or 0.95)
+        if saturation is None:
+            saturation = current_inflight / float(max(total_cap, 1))
 
-        soft_low = int(soft_high * soft_low_ratio) if soft_high > 0 else 0
+        # capacity-weighted worker saturation check if provided
+        loads = self._as_list(worker_load_factors)
+        peak_load = max(loads) if loads else 0.0
+        worker_sat_limit = float(getattr(self._config, "backpressure_worker_saturation", 1.0))
+        if peak_load >= worker_sat_limit:
+            self._in_soft_throttle = True
+            return BackpressureDecision(True, "worker_saturation", max(saturation, peak_load), 0)
 
-        # ── Hard: global inflight cap ────────────────────────────────────
-        if hard_cap > 0 and global_inflight >= hard_cap:
-            logger.warning(
-                "Backpressure HARD: global_inflight=%d >= hard_cap=%d",
-                global_inflight, hard_cap,
-            )
-            return BackpressureSignal(
-                active=True,
-                reason="global_inflight_hard_cap",
-                allowed_dispatches=0,
-                severity="hard",
-            )
-
-        # ── Hard: capacity-weighted saturation ───────────────────────────
-        if worker_load_factors:
-            if worker_capacities and len(worker_capacities) == len(worker_load_factors):
-                # Weighted saturation: large workers count more
-                total_w = sum(worker_capacities)
-                if total_w > 0:
-                    weighted_load = sum(
-                        lf * cap for lf, cap in zip(worker_load_factors, worker_capacities)
-                    ) / total_w
-                    if weighted_load >= sat_threshold:
-                        logger.warning(
-                            "Backpressure HARD: weighted_load=%.2f >= sat_threshold=%.2f",
-                            weighted_load, sat_threshold,
-                        )
-                        return BackpressureSignal(
-                            active=True,
-                            reason="fleet_capacity_saturated",
-                            allowed_dispatches=0,
-                            severity="hard",
-                        )
-            else:
-                # Fallback: all workers must be saturated (conservative)
-                if all(lf >= sat_threshold for lf in worker_load_factors):
-                    logger.warning(
-                        "Backpressure HARD: all %d workers saturated (>= %.2f)",
-                        len(worker_load_factors), sat_threshold,
-                    )
-                    return BackpressureSignal(
-                        active=True,
-                        reason="all_workers_saturated",
-                        allowed_dispatches=0,
-                        severity="hard",
-                    )
-
-        # ── Soft: hysteresis band on inflight ────────────────────────────
-        if soft_high > 0:
-            if not self._in_soft_throttle and global_inflight >= soft_high:
-                self._in_soft_throttle = True
-                logger.debug(
-                    "Backpressure: entering SOFT throttle (inflight=%d >= soft_high=%d)",
-                    global_inflight, soft_high,
-                )
-            elif self._in_soft_throttle and global_inflight < soft_low:
-                self._in_soft_throttle = False
-                logger.debug(
-                    "Backpressure: exiting SOFT throttle (inflight=%d < soft_low=%d)",
-                    global_inflight, soft_low,
-                )
-
-            if self._in_soft_throttle:
-                allowed = max(1, max_dispatches_requested // 2)
-                return BackpressureSignal(
-                    active=True,
-                    reason="global_inflight_soft_cap",
-                    allowed_dispatches=allowed,
-                    severity="soft",
-                )
-
-        # ── Soft: queue depth pressure ───────────────────────────────────
-        if total_capacity > 0 and queue_depth > max_queue_ratio * total_capacity:
-            allowed = max(1, max_dispatches_requested // 2)
-            logger.debug(
-                "Backpressure SOFT: queue_depth=%d > %.1f * capacity=%d → %d",
-                queue_depth, max_queue_ratio, total_capacity, allowed,
-            )
-            return BackpressureSignal(
-                active=True,
-                reason="queue_depth_pressure",
-                allowed_dispatches=allowed,
-                severity="soft",
-            )
-
-        # ── No backpressure ───────────────────────────────────────────────
-        return BackpressureSignal(
-            active=False,
-            reason=None,
-            allowed_dispatches=max_dispatches_requested,
-            severity="none",
+        # hard gate: explicit inflight cap or saturation/hard-cap
+        hard_inflight_cap = int(
+            getattr(self._config, "backpressure_hard_inflight_cap",
+            getattr(self._config, "backpressure_hard_cap", 0))
         )
+        if hard_inflight_cap > 0 and current_inflight >= hard_inflight_cap:
+            self._in_soft_throttle = True
+            return BackpressureDecision(True, "hard_limit", saturation, 0)
+
+        hard = float(getattr(self._config, "backpressure_hard", 1.0))
+        if saturation >= hard:
+            self._in_soft_throttle = True
+            return BackpressureDecision(True, "hard_limit", saturation, 0)
+
+        # soft gate: prefer explicit inflight threshold if configured
+        soft_inflight_cap = int(getattr(self._config, "backpressure_soft_inflight_cap", 0))
+        ratio = float(getattr(self._config, "backpressure_hysteresis_ratio", 0.80))
+        soft_high = float(getattr(self._config, "backpressure_soft_high", 0.90))
+        soft_low = float(getattr(self._config, "backpressure_soft_low", soft_high * ratio))
+
+        if soft_inflight_cap > 0:
+            enter_soft = current_inflight >= soft_inflight_cap
+            exit_soft = current_inflight < max(int(soft_inflight_cap * ratio), 0)
+        else:
+            enter_soft = saturation >= soft_high
+            exit_soft = saturation < soft_low
+
+        if self._in_soft_throttle:
+            if exit_soft:
+                self._in_soft_throttle = False
+            else:
+                allowed = max(req // 2, 1) if req > 0 else 0
+                return BackpressureDecision(True, "soft_hysteresis", saturation, allowed)
+
+        if enter_soft:
+            self._in_soft_throttle = True
+            allowed = max(req // 2, 1) if req > 0 else 0
+            return BackpressureDecision(True, "soft_high", saturation, allowed)
+
+        return BackpressureDecision(False, None, saturation, req)

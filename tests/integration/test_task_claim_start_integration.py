@@ -65,4 +65,4 @@ async def test_task_claim_start_rejects_terminal_state(redis_client):
     )
 
     assert result.ok is False
-    assert result.status == "task_running_state_conflict"
+    assert result.status == "reservation_missing"

@@ -1,265 +1,43 @@
-"""
-hfa-core/src/hfa/runtime/state_store.py
-IRONCLAD Sprint 11 --- State Management Helpers (FINAL)
-"""
 
 from __future__ import annotations
-# from hfa.config.keys import RedisTTL
-# from hfa.state import RunState  # Eklendi
-import json
-import logging
-import time
-from typing import Any, Dict, Optional
 
-from hfa.config.keys import RedisTTL
+from typing import Any
 
-logger = logging.getLogger(__name__)
+from hfa.runtime.redis_policy import RedisCallPolicy
 
 
 class StateStore:
-    """
-    Centralized state management for runs.
-    Enforces consistent Redis contracts.
+    def __init__(self, redis_client: Any, lua_executor: Any, *, policy: RedisCallPolicy | None = None) -> None:
+        self._redis = redis_client
+        self._lua = lua_executor
+        self._policy = policy or RedisCallPolicy(max_retries=3, base_delay_ms=100)
 
-    All key patterns and TTL values are sourced from hfa.config.keys.
-    """
-
-    # Legacy class-level constants preserved for backward compatibility.
-    STATE_KEY = "hfa:run:state:{}"
-    META_KEY = "hfa:run:meta:{}"
-    RESULT_KEY = "hfa:run:result:{}"
-    RUNNING_ZSET = "hfa:cp:running"
-    EXECUTION_TOKEN_KEY = "hfa:run:claim:{}"
-
-    # Backward-compatible aliases
-    TTL = RedisTTL.RUN_STATE
-    CLAIM_TTL = RedisTTL.RUN_CLAIM
-
-    # Preferred names for new code
-    STATE_TTL = RedisTTL.RUN_STATE
-    META_TTL = RedisTTL.RUN_META
-    RESULT_TTL = RedisTTL.RUN_RESULT
-
-    def __init__(self, redis):
-        self._redis = redis
-
-    async def create_run_meta(self, run_id: str, mapping: Dict[str, str]) -> None:
-        key = self.META_KEY.format(run_id)
-        await self._redis.hset(key, mapping=mapping)
-        await self._redis.expire(key, self.TTL)
-
-    async def get_run_state(self, run_id: str) -> Optional[str]:
-        val = await self._redis.get(self.STATE_KEY.format(run_id))
-        if val is None:
-            return None
-        return val.decode() if isinstance(val, bytes) else val
-
-    async def get_run_meta(self, run_id: str) -> Dict[str, str]:
-        raw = await self._redis.hgetall(self.META_KEY.format(run_id))
-        if not raw:
-            return {}
-
-        out: Dict[str, str] = {}
-        for k, v in raw.items():
-            key = k.decode() if isinstance(k, bytes) else k
-            value = v.decode() if isinstance(v, bytes) else v
-            out[key] = value
-        return out
-
-    async def patch_run_meta(self, run_id: str, mapping: Dict[str, str]) -> None:
-        if not mapping:
-            return
-        key = self.META_KEY.format(run_id)
-        await self._redis.hset(key, mapping=mapping)
-        await self._redis.expire(key, self.TTL)
-
-    async def transition_state(
-            self,
-            run_id: str,
-            new_state: str,
-            *,
-            expected_state: str | None = None,
-    ) -> bool:
-        """
-        Transition run state via the single authoritative CAS gateway (hfa.state).
-        """
-        from hfa.state import transition_state as _ts  # authority in hfa-core
-
-        # V22 AKILLI CAS: Eğer caller expected_state vermediyse ve bu bir giriş (admitted)
-        # işlemi değilse, mevcut durumu okuyup CAS kilidine besliyoruz.
-        actual_expected = expected_state
-        if actual_expected is None and new_state not in ("admitted", "queued"):
-            curr_val = await self.get_run_state(run_id)
-            actual_expected = curr_val
-
-        result = await _ts(
-            self._redis,
-            run_id,
-            new_state,
-            state_key=self.STATE_KEY.format(run_id),
-            state_ttl=self.TTL,
-            expected_state=actual_expected,
-        )
-
-        # result.ok özelliği varsa onu kullan, yoksa direkt boolean olarak değerlendir
-        is_ok = getattr(result, "ok", bool(result))
-
-        if is_ok:
-            await self.patch_run_meta(run_id, {"state": new_state})
-            logger.debug("StateStore.transition_state: run=%s → %s", run_id, new_state)
-        else:
-            reason = getattr(result, "reason", "unknown")
-            logger.warning(
-                "StateStore.transition_state CAS miss: run=%s %r reason=%s",
-                run_id, new_state, reason,
-            )
-        return is_ok
-
-    async def store_result(
+    async def reserve_worker(
         self,
-        run_id: str,
-        tenant_id: str,
-        status: str,
-        payload: Dict[str, Any],
-        cost_cents: int = 0,
-        tokens_used: int = 0,
-        error: Optional[str] = None,
-    ) -> None:
-        key = self.RESULT_KEY.format(run_id)
-        result_data: Dict[str, Any] = {
-            "run_id": run_id,
-            "tenant_id": tenant_id,
-            "status": status,
-            "payload": payload,
-            "cost_cents": cost_cents,
-            "tokens_used": tokens_used,
-            "completed_at": time.time(),
-        }
-        if error:
-            result_data["error"] = error
-
-        await self._redis.set(key, json.dumps(result_data), ex=self.TTL)
-        logger.debug("Result stored: run=%s status=%s", run_id, status)
-
-    async def get_result(self, run_id: str) -> Optional[Dict[str, Any]]:
-        val = await self._redis.get(self.RESULT_KEY.format(run_id))
-        if not val:
-            return None
-        try:
-            raw = val.decode() if isinstance(val, bytes) else val
-            return json.loads(raw)
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            logger.error("Failed to decode result for run=%s: %s", run_id, exc)
-            return None
-
-    async def is_terminal(self, run_id: str) -> bool:
-        state = await self.get_run_state(run_id)
-        return state in ("done", "failed", "dead_lettered")
-
-    async def claim_execution(self, run_id: str, worker_id: str) -> bool:
-        key = self.EXECUTION_TOKEN_KEY.format(run_id)
-        claimed = await self._redis.set(key, worker_id, nx=True, ex=self.CLAIM_TTL)
-        return bool(claimed)
-
-    async def renew_claim(self, run_id: str) -> bool:
-        key = self.EXECUTION_TOKEN_KEY.format(run_id)
-        return bool(await self._redis.expire(key, self.CLAIM_TTL))
-
-    async def release_claim(self, run_id: str) -> None:
-        await self._redis.delete(self.EXECUTION_TOKEN_KEY.format(run_id))
-
-    async def mark_running(
-        self,
-        run_id: str,
+        *,
         worker_id: str,
-        worker_group: str,
-        shard: int,
-    ) -> bool:
-        if not await self.claim_execution(run_id, worker_id):
-            logger.warning(
-                "Failed to claim execution for run=%s (already claimed)", run_id
-            )
-            return False
-
-        if await self.is_terminal(run_id):
-            await self.release_claim(run_id)
-            return False
-
-        now = time.time()
-        await self.patch_run_meta(
-            run_id,
-            {
-                "worker_id": worker_id,
-                "worker_group": worker_group,
-                "shard": str(shard),
-                "started_at": str(now),
-            },
+        run_id: str,
+        ttl_ms: int = 5000,
+    ) -> Any:
+        key = f"hfa:worker:{worker_id}:reservation"
+        return await self._policy.execute_with_policy(
+            "reserve_worker_lua",
+            self._lua.execute,
+            script_name="reserve_worker",
+            keys=[key],
+            args=[run_id, ttl_ms],
         )
-        # V22: Sadece 'scheduled' durumundaysa 'running' yapabiliriz.
-        success = await self.transition_state(run_id, "running", expected_state="scheduled")
-        if not success:
-            await self.release_claim(run_id)
-            return False
 
-        await self._redis.zadd(self.RUNNING_ZSET, {run_id: now})
-        # await self._redis.zadd(self.RUNNING_ZSET, {run_id: now})
-
-        logger.info(
-            "Run marked running: %s worker=%s shard=%d", run_id, worker_id, shard
+    async def update_vruntime(
+        self,
+        *,
+        tenant_id: str,
+        delta: float,
+    ) -> Any:
+        key = f"hfa:tenant:{tenant_id}:vruntime"
+        return await self._policy.execute_with_policy(
+            "update_vruntime_redis",
+            self._redis.incrbyfloat,
+            key,
+            delta,
         )
-        return True
-
-    async def mark_completed(self, run_id: str) -> None:
-        await self._redis.zrem(self.RUNNING_ZSET, run_id)
-        await self.release_claim(run_id)
-
-    # ------------------------------------------------------------------
-    # Sprint 12 — diagnostic / introspection helpers
-    # ------------------------------------------------------------------
-
-    async def get_running_runs(self, limit: int = 100) -> list[dict]:
-        """
-        Return up to `limit` runs currently in the running ZSET.
-        Each entry contains run_id, score (started_at), and current state.
-        """
-        try:
-            raw = await self._redis.zrange(
-                self.RUNNING_ZSET, 0, limit - 1, withscores=True
-            )
-        except Exception:
-            return []
-
-        result: list[dict] = []
-        for item in raw:
-            if isinstance(item, (list, tuple)) and len(item) == 2:
-                run_id_raw, score = item
-            else:
-                continue
-            run_id = (
-                run_id_raw.decode() if isinstance(run_id_raw, bytes) else run_id_raw
-            )
-            state = await self.get_run_state(run_id)
-            result.append(
-                {
-                    "run_id": run_id,
-                    "started_at": float(score),
-                    "state": state or "unknown",
-                }
-            )
-        return result
-
-    async def get_claim_owner(self, run_id: str) -> str | None:
-        """Return the worker_id that holds the execution claim, or None."""
-        key = self.EXECUTION_TOKEN_KEY.format(run_id)
-        val = await self._redis.get(key)
-        if val is None:
-            return None
-        return val.decode() if isinstance(val, bytes) else val
-
-    async def get_claim_ttl(self, run_id: str) -> int:
-        """Return TTL seconds remaining on the execution claim, or -2 if absent."""
-        key = self.EXECUTION_TOKEN_KEY.format(run_id)
-        try:
-            return await self._redis.ttl(key)
-        except Exception:
-            return -2
