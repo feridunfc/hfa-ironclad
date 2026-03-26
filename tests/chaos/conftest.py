@@ -1,4 +1,3 @@
-
 import asyncio
 import inspect
 import os
@@ -39,8 +38,9 @@ async def redis_client():
     use_fake = os.getenv("USE_FAKE_REDIS", "0") == "1"
 
     if use_fake:
-        import fakeredis.aioredis as fakeredis
-        client = fakeredis.FakeRedis(decode_responses=True)
+        # 🔥 ZOMBİ İNFAZ EDİLDİ: Artık doğrudan modern FakeAsyncRedis kullanıyoruz
+        from fakeredis import FakeAsyncRedis
+        client = FakeAsyncRedis(decode_responses=True)
     else:
         import redis.asyncio as redis
         host = os.getenv("REDIS_HOST", "127.0.0.1")

@@ -30,7 +30,7 @@ TERMINAL_STATES: frozenset[str] = frozenset({"done", "failed", "rejected", "dead
 
 
 class InvalidStateTransition(Exception):
-    """Raised when a transition is rejected by the state machine."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -79,14 +79,14 @@ def validate_transition(
     allowed = VALID_TRANSITIONS.get(from_state)
     if allowed is None:
         msg = f"run={run_id}: unknown state {from_state!r}"
-        logger.error("StateTransition fail-closed: %s", msg)
         if raise_on_invalid:
             raise InvalidStateTransition(msg)
         return False
+
     if to_state in allowed:
         return True
+
     msg = f"run={run_id}: illegal transition {from_state!r} -> {to_state!r} (allowed: {sorted(allowed)})"
-    logger.error("StateTransition ILLEGAL: %s", msg)
     if raise_on_invalid:
         raise InvalidStateTransition(msg)
     return False
@@ -111,11 +111,9 @@ def _state_script_path() -> Path:
 
 async def _get_lua_loader(redis):
     from hfa.lua.loader import LuaScriptLoader
-
     loader = _loader_cache.get(redis)
     if loader is not None:
         return loader
-
     script_path = _state_script_path()
     loader = LuaScriptLoader(redis, script_path)
     try:
@@ -125,9 +123,7 @@ async def _get_lua_loader(redis):
             raise RuntimeError(f"StateMachine strict CAS mode: failed to load {script_path.name}: {exc}") from exc
         logger.warning("StateMachine Lua loader unavailable (%s) — Python fallback", exc)
         return None
-
     _loader_cache[redis] = loader
-    logger.info("StateMachine: Lua CAS loader initialised")
     return loader
 
 
@@ -139,32 +135,51 @@ async def get_run_state(redis, run_id: str, *, state_key: Optional[str] = None) 
 async def transition_state(
     redis,
     run_id: str,
-    to_state: str,
+    to_state: Optional[str] = None,
     *,
-    state_key: str,
+    state_key: Optional[str] = None,
     state_ttl: int = 86400,
     expected_state: Optional[str] = None,
     raise_on_invalid: bool = False,
+    target_state: Optional[str] = None,
+    ttl_seconds: Optional[int] = None,
+    lua_loader="__AUTO__",
 ):
+    to_state = target_state or to_state
+    if to_state is None:
+        raise TypeError("transition_state requires to_state/target_state")
+    state_key = state_key or run_id
+    state_ttl = ttl_seconds if ttl_seconds is not None else state_ttl
     mode = "initial" if expected_state is None else "cas"
 
-    loader = await _get_lua_loader(redis)
+    # Backward-compat contract:
+    # - lua_loader omitted => auto-load
+    # - lua_loader=None => explicit fallback request
+    if lua_loader == "__AUTO__":
+        loader = await _get_lua_loader(redis)
+        if loader is None and _strict_cas_mode():
+            raise RuntimeError("StateMachine strict CAS mode: lua_loader unavailable")
+    elif lua_loader is None:
+        if _strict_cas_mode():
+            raise RuntimeError("Strict CAS requires Lua loader")
+        loader = None
+    else:
+        loader = lua_loader
+
     if loader is not None:
         try:
-            runner = getattr(loader, "run", None)
+            runner = getattr(loader, "run", None) or getattr(loader, "execute", None)
             if runner is None:
-                runner = loader.execute
-                result = await runner(
-                    script_name="state_transition",
-                    keys=[state_key],
-                    args=[run_id, to_state, expected_state or "", str(state_ttl), mode],
-                )
+                raise RuntimeError("lua loader has no run/execute")
+            kwargs = {
+                "keys": [state_key],
+                "args": [run_id, to_state, expected_state or "", str(state_ttl), mode],
+            }
+            if getattr(loader, "run", None) is not None:
+                kwargs["num_keys"] = 1
             else:
-                result = await runner(
-                    num_keys=1,
-                    keys=[state_key],
-                    args=[run_id, to_state, expected_state or "", str(state_ttl), mode],
-                )
+                kwargs["script_name"] = "state_transition"
+            result = await runner(**kwargs)
 
             if isinstance(result, (list, tuple)) and len(result) >= 2:
                 code = int(result[0])
@@ -187,35 +202,11 @@ async def transition_state(
                 return TransitionResult(False, TransitionResult.TERMINAL_BLOCKED, prior, to_state, run_id)
             if code == -4:
                 return TransitionResult(False, TransitionResult.UNKNOWN_STATE, prior, to_state, run_id)
-            logger.warning("StateMachine Lua returned unexpected code=%r for run=%s", code, run_id)
         except Exception as exc:
             if _strict_cas_mode():
                 raise RuntimeError(f"StateMachine strict CAS mode: Lua CAS failed for run={run_id}: {exc}") from exc
             logger.warning("StateMachine Lua CAS failed (%s) — Python fallback", exc)
 
-    return await _python_transition(
-        redis,
-        run_id,
-        to_state,
-        state_key=state_key,
-        state_ttl=state_ttl,
-        expected_state=expected_state,
-        mode=mode,
-        raise_on_invalid=raise_on_invalid,
-    )
-
-
-async def _python_transition(
-    redis,
-    run_id: str,
-    to_state: str,
-    *,
-    state_key: str,
-    state_ttl: int,
-    expected_state: Optional[str],
-    mode: str,
-    raise_on_invalid: bool,
-) -> TransitionResult:
     current = await get_run_state(redis, run_id, state_key=state_key)
 
     if mode == "initial":
@@ -230,16 +221,13 @@ async def _python_transition(
     if is_terminal(current):
         return TransitionResult(False, TransitionResult.TERMINAL_BLOCKED, current, to_state, run_id)
 
-    if current is not None:
-        allowed = VALID_TRANSITIONS.get(current)
-        if allowed is None:
-            if raise_on_invalid:
-                raise InvalidStateTransition(f"run={run_id}: unknown state {current!r}")
-            return TransitionResult(False, TransitionResult.UNKNOWN_STATE, current, to_state, run_id)
-        if to_state not in allowed:
-            if raise_on_invalid:
-                raise InvalidStateTransition(f"run={run_id}: illegal {current!r} -> {to_state!r}")
-            return TransitionResult(False, TransitionResult.ILLEGAL_TRANSITION, current, to_state, run_id)
+    allowed = VALID_TRANSITIONS.get(current) if current is not None else None
+    if current is not None and allowed is None:
+        return TransitionResult(False, TransitionResult.UNKNOWN_STATE, current, to_state, run_id)
+    if current is not None and to_state not in allowed:
+        if raise_on_invalid:
+            validate_transition(run_id, current, to_state, raise_on_invalid=True)
+        return TransitionResult(False, TransitionResult.ILLEGAL_TRANSITION, current, to_state, run_id)
 
     await redis.set(state_key, to_state, ex=state_ttl)
     return TransitionResult(True, TransitionResult.COMMITTED, current, to_state, run_id)
