@@ -2,11 +2,10 @@
 # Apply & verify
 
 Overwrite:
-- hfa-core/src/hfa/state/__init__.py
-- hfa-control/src/hfa_control/scheduler_reservation_dispatch.py
-- hfa-core/src/hfa/dag/schema.py
+- hfa-core/src/hfa/runtime/state_store.py
+- hfa-worker/src/hfa_worker/input_resolver.py
 
 Run:
 ```powershell
-.\.venv\Scripts\python -m pytest -k "not integration"
+.\.venv\Scripts\python -m pytest tests/core/test_payload_store_hardening_core.py -vv
 ```

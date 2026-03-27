@@ -1,14 +1,18 @@
 
-# Phase 7C-B + 7C-C apply notes
+# 8B integration apply notes
 
 ## Files
-- hfa-control/src/hfa_control/scheduler_reservation_dispatch.py
-- hfa-core/src/hfa/runtime/state_store.py
-- tests/core/test_exactly_once_dispatch_core.py
-- tests/core/test_exactly_once_completion_core.py
+- tests/integration/test_lineage_flow_integration.py
 
 ## Verify
 ```powershell
-.\.venv\Scripts\python -m pytest tests/core/test_exactly_once_dispatch_core.py -vv
-.\.venv\Scripts\python -m pytest tests/core/test_exactly_once_completion_core.py -vv
+.\.venv\Scripts\python -m pytest tests/integration/test_lineage_flow_integration.py -vv
 ```
+
+## What this proves
+- producer lineage persistence
+- consumer lineage recording
+- run-level edge graph creation
+- duplicate consume suppression
+- checksum guard before lineage write
+- run_id isolation for same task_id

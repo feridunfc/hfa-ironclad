@@ -64,8 +64,12 @@ def _wait_for_redis(url: str, timeout_s: float = 30.0) -> None:
 
 @pytest.fixture(scope="session", autouse=True)
 def integration_redis_stack() -> Iterator[None]:
-    _run(["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "--remove-orphans"])
-    _wait_for_redis(REDIS_URL, timeout_s=30.0)
+    import os
+
+    if os.getenv("USE_EXISTING_REDIS") != "1":
+        _run(["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "--remove-orphans"])
+
+        _wait_for_redis(REDIS_URL, timeout_s=30.0)
 
     try:
         yield

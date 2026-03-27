@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
+from hfa_control.effect_config import get_dispatch_effect_ttl
 from hfa_control.effect_ledger import EffectLedger
+from hfa_control.effect_metrics import DUPLICATE_DISPATCH_SUPPRESSED, increment
 from hfa_control.event_hooks import emit_event_background
 from hfa_control.event_store import EventStore
 
@@ -17,6 +20,8 @@ class ReservationDispatchResult:
     run_id: str = ""
     tenant_id: str = ""
     scheduler_epoch: str = ""
+    reason: Optional[str] = None
+    committed_state: Optional[str] = None
 
 
 SchedulerReservationDispatchResult = ReservationDispatchResult
@@ -64,8 +69,11 @@ class SchedulerReservationDispatcher:
                 token=token,
                 effect_type="dispatch",
                 owner_id=worker_id,
+                ttl_seconds=get_dispatch_effect_ttl(),
             )
             if receipt.duplicate:
+                receipt.reason = "duplicate_dispatch_suppressed"
+                increment(DUPLICATE_DISPATCH_SUPPRESSED)
                 return ReservationDispatchResult(
                     ok=False,
                     status="duplicate_dispatch_suppressed",
@@ -74,6 +82,8 @@ class SchedulerReservationDispatcher:
                     run_id=run_id,
                     tenant_id=tenant_id,
                     scheduler_epoch=scheduler_epoch,
+                    reason=receipt.reason,
+                    committed_state=receipt.committed_state,
                 )
 
         try:
@@ -133,6 +143,7 @@ class SchedulerReservationDispatcher:
             run_id=run_id,
             tenant_id=tenant_id,
             scheduler_epoch=scheduler_epoch,
+            committed_state="scheduled",
         )
         emit_event_background(
             self._event_store,
